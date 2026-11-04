@@ -1,0 +1,1 @@
+pulse main() { atom a: u8 = 1.5  beam a }

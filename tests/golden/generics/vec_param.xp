@@ -1,0 +1,15 @@
+pulse first_of<T>(v: Vec<T>) -> T {
+    return v.get(0)
+}
+
+pulse main() {
+    atom xs: Vec<int> = spawn Vec<int> { }
+    xs.push(10)
+    xs.push(20)
+    atom f = first_of(xs)
+    beam f"f={f}"
+    atom names: Vec<str> = spawn Vec<str> { }
+    names.push("ann")
+    atom g = first_of(names)
+    beam f"g={g}"
+}

@@ -1,0 +1,1 @@
+pulse main() { atom a = 5u8  atom b: u16 = a  beam b }

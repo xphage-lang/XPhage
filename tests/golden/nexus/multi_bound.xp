@@ -1,0 +1,10 @@
+// A type parameter bounded by several nexus: `T: Named + Aged`.
+nexus Named { name() -> str }
+nexus Aged  { age() -> int }
+forge Person { n: str = ""  a: int = 0 }
+impl Named for Person { name() -> str { return self.n } }
+impl Aged  for Person { age() -> int { return self.a } }
+pulse card<T: Named + Aged>(x: T) -> str { return f"{x.name()} ({x.age()})" }
+pulse main() {
+    beam card(spawn Person { n: "Ada", a: 36 })
+}

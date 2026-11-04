@@ -1,0 +1,19 @@
+enum Result<T, E> { Ok(T)  Err(E) }
+pulse pass_through<T>(r: Result<T, str>) -> Result<T, str> {
+    atom v = r?
+    return Result.Ok(v)
+}
+pulse mk(ok: bool) -> Result<int, str> {
+    if ok { return Result.Ok(42) }
+    return Result.Err("nope")
+}
+pulse show(r: Result<int, str>) {
+    probe r {
+        diverge Result.Ok(v) -> { beam f"ok {v}" }
+        diverge Result.Err(e) -> { beam f"err {e}" }
+    }
+}
+pulse main() {
+    show(pass_through(mk(true)))
+    show(pass_through(mk(false)))
+}

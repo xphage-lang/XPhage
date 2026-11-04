@@ -45,6 +45,11 @@ XpStr* xprt_str_new(const char* lit) {
     return s;
 }
 
+XpStr* xprt_str_from_uint(uint64_t v) {
+    char buf[32];
+    snprintf(buf, sizeof buf, "%llu", (unsigned long long)v);
+    return xprt_str_new(buf);
+}
 XpStr* xprt_str_from_int(int64_t v) {
     char buf[32];
     snprintf(buf, sizeof(buf), "%lld", (long long)v);
@@ -96,6 +101,13 @@ int64_t xprt_str_len(XpStr* s)  { return s ? s->len : 0; }
 int xprt_str_eq(XpStr* a, XpStr* b) {
     if (!a || !b) return a == b;
     return a->len == b->len && memcmp(a->data, b->data, (size_t)a->len) == 0;
+}
+int xprt_str_cmp(XpStr* a, XpStr* b) {
+    int64_t la = a ? a->len : 0, lb = b ? b->len : 0;
+    int64_t n  = la < lb ? la : lb;
+    int c = n ? memcmp(a->data, b->data, (size_t)n) : 0;
+    if (c) return c < 0 ? -1 : 1;
+    return la < lb ? -1 : (la > lb ? 1 : 0);
 }
 int xprt_str_eq_cstr(XpStr* s, const char* c) {
     if (!s) return !c || !*c;
@@ -167,6 +179,7 @@ void xprt_beam_str(XpStr* s) {
     if (s) puts(s->data); else puts("");
 }
 void xprt_beam_int(int64_t v)   { printf("%lld\n", (long long)v); }
+void xprt_beam_uint(uint64_t v)  { printf("%llu\n", (unsigned long long)v); }
 void xprt_beam_float(double v)  { printf("%g\n", v); }
 void xprt_beam_bool(int v)      { puts(v ? "true" : "false"); }
 void xprt_beam_newline(void)    { puts(""); }
@@ -291,6 +304,19 @@ void xprt_vec_push(XpVec* v, void* item) {
 void*   xprt_vec_get(XpVec* v, int64_t i) { return (i>=0&&i<v->len) ? v->data[i] : NULL; }
 int64_t xprt_vec_len(XpVec* v) { return v->len; }
 void    xprt_vec_free(XpVec* v) { free(v->data); free(v); }
+XpVec* xprt_vec_clone(const XpVec* v) {
+    // Shallow copy of the slots. Elements are 8-byte payload slots (ints,
+    // bools, doubles bit-cast, or string/other pointers), so copying the
+    // slot values gives the callee its own array; pointer elements still
+    // alias the same pointee, which matches copying a container of
+    // pointer-typed values.
+    XpVec* c = (XpVec*)malloc(sizeof(XpVec));
+    c->cap = v->cap > 0 ? v->cap : 8;
+    c->len = v->len;
+    c->data = (void**)malloc(sizeof(void*) * (size_t)c->cap);
+    for (int64_t i = 0; i < v->len; i++) c->data[i] = v->data[i];
+    return c;
+}
 
 // ─────────────────────────────────────────────────────────────
 // XpMap (open-addressing hash map)
@@ -670,4 +696,10 @@ void xprt_eprintln(const char* msg){ fputs(msg, stderr); fputc('\n', stderr); ff
 XpStr* xprt_input(const char* prompt) {
     if (prompt && *prompt) { fputs(prompt, stdout); fflush(stdout); }
     return xprt_scan_str();
+}
+
+_Noreturn void xprt_panic(XpStr* msg) {
+    fprintf(stderr, "panic: %s\n", msg && msg->data ? msg->data : "");
+    fflush(stderr);
+    exit(101);
 }

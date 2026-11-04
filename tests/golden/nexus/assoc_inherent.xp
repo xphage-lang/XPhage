@@ -1,0 +1,16 @@
+// Associated (receiver-less) functions: `pulse` without `self`, called as Type::f().
+forge Point { x: int = 0  y: int = 0 }
+impl Point {
+    pulse new(x: int, y: int) -> Self { return spawn Self { x: x, y: y } }
+    pulse origin() -> Self { return Self::new(0, 0) }
+    pulse unit() -> Self { return Self::new(1, 1) }
+    sum() -> int { return self.x + self.y }
+}
+pulse main() {
+    atom a = Point::new(3, 4)
+    atom o = Point::origin()
+    atom u = Point::unit()
+    beam a.sum()
+    beam o.sum()
+    beam u.sum()
+}

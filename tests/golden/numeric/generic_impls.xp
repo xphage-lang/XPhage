@@ -1,0 +1,29 @@
+nexus Ord { cmp(other: Self) -> int }
+impl Ord for u8 {
+    cmp(other: Self) -> int {
+        if self < other { return -1 }
+        if self > other { return 1 }
+        return 0
+    }
+}
+impl Ord for i32 {
+    cmp(other: Self) -> int {
+        if self < other { return -1 }
+        if self > other { return 1 }
+        return 0
+    }
+}
+pulse max_of<T: Ord>(a: T, b: T) -> T {
+    if a.cmp(b) >= 0 { return a }
+    return b
+}
+pulse main() {
+    beam max_of(3u8, 200u8)
+    beam max_of(-5i32, -9i32)
+    atom x: byte = 7
+    atom y: i64 = 9
+    atom z: f64 = 1.5
+    beam max_of(x, 2u8)
+    beam y + 1
+    beam z * 2.0
+}

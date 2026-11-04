@@ -1,0 +1,9 @@
+pulse loud(tag: str) -> bool {
+    beam f"evaluated {tag}"
+    return true
+}
+pulse main() {
+    atom a = false && loud("rhs-of-false-and")
+    atom b = true || loud("rhs-of-true-or")
+    beam f"a={a} b={b}"
+}

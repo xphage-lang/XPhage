@@ -1,0 +1,10 @@
+extern "C" {
+    pulse toupper(c: i32) -> i32
+    pulse getpid() -> i32
+    pulse strlen(s: str) -> usize
+}
+pulse main() {
+    beam toupper(97)
+    beam getpid() > 0
+    beam strlen("hello")
+}

@@ -1,0 +1,2 @@
+pulse f(x: u8) -> u8 { return x }
+pulse main() { atom n = 3  beam f(n) }

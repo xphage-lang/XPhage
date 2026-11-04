@@ -118,6 +118,8 @@ enum TokenType {
     AND_AND, PIPE_PIPE, BANG,                 // && || !
     EQUAL,                                    // =
     PLUS_EQ, MINUS_EQ, STAR_EQ, SLASH_EQ,    // += -= *= /=
+    PERCENT_EQ, AMP_EQ, PIPE_EQ, CARET_EQ,   // %= &= |= ^=
+    LSHIFT_EQ, RSHIFT_EQ,                    // <<= >>=
     PIPE_GT,                                  // |> pipeline
     DOT_DOT,                                  // .. range
     QUESTION,                                 // ? error propagation
@@ -159,6 +161,9 @@ struct Token {
     std::string value;
     uint32_t    line = 1;
     uint32_t    col  = 1;
+    // Numeric literals only: the explicit type suffix ("u8", "i32", "f32", ...),
+    // or empty. `value` then holds the bare decimal digits.
+    std::string suffix;
 };
 
 // ============================================================

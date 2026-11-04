@@ -1,0 +1,17 @@
+pulse main() {
+    atom buf: Vec<u8> = spawn Vec<u8> { }
+    buf.push(72)
+    buf.push(105)
+    buf.push(255)
+    shadow total: u32 = 0
+    shadow i: int = 0
+    for k in 0..buf.len() {
+        total += cast(buf.get(k), u32)
+    }
+    beam total
+    beam buf.get(2)
+    atom fs: Vec<f32> = spawn Vec<f32> { }
+    fs.push(1.5)
+    fs.push(2.25)
+    beam fs.get(0) + fs.get(1)
+}

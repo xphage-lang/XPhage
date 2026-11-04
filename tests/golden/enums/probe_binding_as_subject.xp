@@ -1,0 +1,21 @@
+enum Shape {
+    Circle(int)
+    Square(int)
+}
+enum Wrap {
+    Has(Shape)
+    Empty
+}
+
+pulse main() {
+    atom w = Wrap.Has(Shape.Circle(4))
+    probe w {
+        diverge Wrap.Has(inner) -> {
+            probe inner {
+                diverge Shape.Circle(r) -> { beam f"circle={r}" }
+                diverge Shape.Square(q) -> { beam f"square={q}" }
+            }
+        }
+        diverge Wrap.Empty -> { beam f"empty" }
+    }
+}

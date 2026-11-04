@@ -1,0 +1,17 @@
+enum Msg {
+    Point(int, int)
+    Named(str, int)
+    Quit
+}
+pulse run(m: Msg) {
+    probe m {
+        diverge Msg.Point(x, y)  -> { beam f"point {x},{y}" }
+        diverge Msg.Named(s, n)  -> { beam f"named {s}={n}" }
+        diverge Msg.Quit         -> { beam f"quit" }
+    }
+}
+pulse main() {
+    run(Msg.Point(3, 4))
+    run(Msg.Named("age", 30))
+    run(Msg.Quit)
+}

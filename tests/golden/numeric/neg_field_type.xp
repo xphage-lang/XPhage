@@ -1,0 +1,2 @@
+forge P { x: u8 = 0 }
+pulse main() { atom n: i32 = 4  atom p = spawn P { x: n }  beam p.x }

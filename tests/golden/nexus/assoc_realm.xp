@@ -1,0 +1,13 @@
+realm Zoo {
+    forge Lion { age: int = 0 }
+    impl Lion { pulse cub() -> Self { return spawn Self { age: 1 } } }
+    pulse adopt() -> int {
+        atom l = Lion::cub()
+        return l.age + 10
+    }
+}
+pulse main() {
+    atom l = Zoo::Lion::cub()
+    beam l.age
+    beam Zoo::adopt()
+}

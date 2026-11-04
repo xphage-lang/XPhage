@@ -1,0 +1,20 @@
+enum Result<T, E> { Ok(T)  Err(E) }
+pulse parse(s: str) -> Result<int, str> {
+    if s == "7" { return Result.Ok(7) }
+    return Result.Err(f"cannot parse {s}")
+}
+pulse via_var(s: str) -> Result<int, str> {
+    atom r = parse(s)
+    atom v = r?
+    return Result.Ok(v + 1)
+}
+pulse show(r: Result<int, str>) {
+    probe r {
+        diverge Result.Ok(v) -> { beam f"ok {v}" }
+        diverge Result.Err(e) -> { beam f"err {e}" }
+    }
+}
+pulse main() {
+    show(via_var("7"))
+    show(via_var("q"))
+}

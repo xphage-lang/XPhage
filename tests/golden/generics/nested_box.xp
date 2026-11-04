@@ -1,0 +1,15 @@
+forge Box<T> {
+    value: T
+}
+
+pulse unbox<T>(b: Box<T>) -> T {
+    return b.value
+}
+
+pulse main() {
+    atom inner: Box<int> = spawn Box<int> { value: 5 }
+    atom outer: Box<Box<int>> = spawn Box<Box<int>> { value: inner }
+    atom got = unbox(outer)
+    atom deep = unbox(got)
+    beam f"deep={deep}"
+}

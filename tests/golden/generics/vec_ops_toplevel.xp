@@ -1,0 +1,9 @@
+pulse main() {
+    atom xs: Vec<int> = spawn Vec<int> { }
+    xs.push(10)
+    xs.push(20)
+    xs.push(30)
+    beam f"len={xs.len()}"
+    beam f"first={xs.get(0)}"
+    beam f"last={xs.get(2)}"
+}

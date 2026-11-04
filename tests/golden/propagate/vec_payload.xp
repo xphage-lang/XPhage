@@ -1,0 +1,22 @@
+enum Result<T, E> { Ok(T)  Err(E) }
+pulse load(n: int) -> Result<Vec<int>, str> {
+    if n < 0 { return Result.Err("negative") }
+    atom v: Vec<int> = spawn Vec<int> { }
+    for i in 0..n { v.push(i * i) }
+    return Result.Ok(v)
+}
+pulse total_len(n: int) -> Result<int, str> {
+    shadow xs = load(n)?
+    xs.push(999)
+    return Result.Ok(xs.len())
+}
+pulse show(r: Result<int, str>) {
+    probe r {
+        diverge Result.Ok(v) -> { beam f"len {v}" }
+        diverge Result.Err(e) -> { beam f"err {e}" }
+    }
+}
+pulse main() {
+    show(total_len(3))
+    show(total_len(-1))
+}

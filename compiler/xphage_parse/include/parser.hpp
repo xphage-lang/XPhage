@@ -47,6 +47,7 @@ public:
     // lex→parse→emit pipeline as every other expression in the language,
     // so reserved-keyword sanitization and all other transforms apply).
     ASTNodePtr parse_single_expression() { return parse_expr(); }
+    void attach_fstring_parts(const ASTNodePtr& n);
 
 private:
     std::vector<Token>      tokens_;
@@ -62,6 +63,13 @@ private:
     bool          match(TokenType t);
     bool          match_any(std::initializer_list<TokenType>);
     const Token& expect(TokenType t, const std::string& msg);
+    // Consumes the closing '>' of a generic argument/parameter list.
+    // A '>>' token (right-shift) closing two nested generics, as in
+    // Vec<Vec<int>> or Result<Option<T>, E>, is split in place: the
+    // token is rewritten to a single '>' and NOT advanced past, which
+    // models "consumed the first '>', one remains for the enclosing
+    // generic". Otherwise behaves exactly like expect(GT, msg).
+    void          expect_generic_close(const std::string& msg);
     void          error(const std::string& msg);
     void          sync_to_next_stmt();
     bool          ensure_progress_or_recover(size_t pos_before, const char* context);

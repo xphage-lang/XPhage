@@ -1,0 +1,29 @@
+enum Fail { NotFound  Denied  Broken }
+enum Result<T, E> { Ok(T)  Err(E) }
+
+pulse lookup(k: int) -> Result<int, Fail> {
+    if k == 1 { return Result.Ok(100) }
+    if k == 2 { return Result.Err(Fail.Denied) }
+    return Result.Err(Fail.NotFound)
+}
+pulse twice(k: int) -> Result<int, Fail> {
+    atom v = lookup(k)?
+    return Result.Ok(v * 2)
+}
+pulse name(f: Fail) -> str {
+    probe f {
+        diverge Fail.NotFound -> { return "not-found" }
+        diverge Fail.Denied -> { return "denied" }
+        diverge Fail.Broken -> { return "broken" }
+    }
+    return "?"
+}
+pulse main() {
+    for k in 1..4 {
+        atom r = twice(k)
+        probe r {
+            diverge Result.Ok(v) -> { beam f"k={k} ok {v}" }
+            diverge Result.Err(e) -> { beam f"k={k} err {name(e)}" }
+        }
+    }
+}

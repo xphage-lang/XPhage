@@ -1,0 +1,9 @@
+// Explicit type arguments: f<int, str>(...) — needed when a type parameter appears in no argument.
+pulse first<A, B>(a: A, b: B) -> A { return a }
+pulse zero<T>() -> int { return 0 }
+pulse main() {
+    beam first<int, str>(7, "x")
+    beam first<str, int>("s", 2)
+    beam zero<float>()
+    beam 3 < 4
+}

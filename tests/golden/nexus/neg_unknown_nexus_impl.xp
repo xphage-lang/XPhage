@@ -1,0 +1,3 @@
+forge D { n: int = 0 }
+impl Nope for D { f() -> int { return 1 } }
+pulse main() { beam 1 }

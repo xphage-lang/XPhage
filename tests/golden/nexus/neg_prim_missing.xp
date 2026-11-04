@@ -1,0 +1,4 @@
+nexus Ord { cmp(other: Self) -> int }
+impl Ord for int { cmp(other: Self) -> int { return 0 } }
+pulse biggest<T: Ord>(a: T, b: T) -> T { return a }
+pulse main() { beam biggest("a", "b") }

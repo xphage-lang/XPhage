@@ -1,0 +1,152 @@
+// core -- Option<T> and Result<T, E>
+//
+// Written in XPhage itself (generic enums + generic pulses), not as compiler
+// built-ins: the same source is compiled by every backend, so it behaves the
+// same everywhere, and these are the two enums the `?` operator is defined
+// on (see include/xphage/enum_shape.hpp: Ok/Err and Some/None by shape).
+//
+//     ~link "core"
+//
+//     pulse find(k: int) -> Option<int> { ... return Option.Some(v) ... }
+//     atom n = option_unwrap_or(find(3), 0)
+//
+// API shape: free functions named option_* / result_*, matching the rest of
+// the standard library (str_*, vec_*, map_*). Method syntax (`o.is_some()`)
+// is deliberately not used: it is not yet supported on every backend.
+//
+// Not here, and why:
+//   * `option_none()` / `result_ok(x)` -- the missing type argument cannot be
+//     inferred from the arguments; write `Option.None` / `Result.Ok(x)` where
+//     the expected type is known (a return, a typed let, a call argument).
+//   * option_map / result_map / and_then -- need function values, which the
+//     language does not support yet (lambda parameters are rejected by the
+//     analyzer). Use `probe`.
+
+enum Option<T> {
+    Some(T)
+    None
+}
+
+enum Result<T, E> {
+    Ok(T)
+    Err(E)
+}
+
+// ---------------------------------------------------------------- Option
+
+// Wraps a value: option_some(5) is Option<int>.
+pulse option_some<T>(value: T) -> Option<T> {
+    return Option.Some(value)
+}
+
+pulse option_is_some<T>(o: Option<T>) -> bool {
+    probe o {
+        diverge Option.Some(v) -> { return true }
+        diverge Option.None -> { return false }
+    }
+    return false
+}
+
+pulse option_is_none<T>(o: Option<T>) -> bool {
+    probe o {
+        diverge Option.Some(v) -> { return false }
+        diverge Option.None -> { return true }
+    }
+    return true
+}
+
+// The value, or `fallback` when there is none.
+pulse option_unwrap_or<T>(o: Option<T>, fallback: T) -> T {
+    probe o {
+        diverge Option.Some(v) -> { return v }
+        diverge Option.None -> { return fallback }
+    }
+    return fallback
+}
+
+// The value; panics (exit status 101) when there is none. Prefer
+// option_unwrap_or, or probe, unless None is a bug.
+pulse option_unwrap<T>(o: Option<T>) -> T {
+    probe o {
+        diverge Option.Some(v) -> { return v }
+        diverge Option.None -> { panic("option_unwrap called on None") }
+    }
+}
+
+// Like option_unwrap, but panics with your message.
+pulse option_expect<T>(o: Option<T>, msg: str) -> T {
+    probe o {
+        diverge Option.Some(v) -> { return v }
+        diverge Option.None -> { panic(msg) }
+    }
+}
+
+// Some(v) -> Ok(v); None -> Err(err).
+pulse option_ok_or<T, E>(o: Option<T>, err: E) -> Result<T, E> {
+    probe o {
+        diverge Option.Some(v) -> { return Result.Ok(v) }
+        diverge Option.None -> { return Result.Err(err) }
+    }
+    return Result.Err(err)
+}
+
+// ---------------------------------------------------------------- Result
+
+pulse result_is_ok<T, E>(r: Result<T, E>) -> bool {
+    probe r {
+        diverge Result.Ok(v) -> { return true }
+        diverge Result.Err(e) -> { return false }
+    }
+    return false
+}
+
+pulse result_is_err<T, E>(r: Result<T, E>) -> bool {
+    probe r {
+        diverge Result.Ok(v) -> { return false }
+        diverge Result.Err(e) -> { return true }
+    }
+    return true
+}
+
+// The value, or `fallback` on error.
+pulse result_unwrap_or<T, E>(r: Result<T, E>, fallback: T) -> T {
+    probe r {
+        diverge Result.Ok(v) -> { return v }
+        diverge Result.Err(e) -> { return fallback }
+    }
+    return fallback
+}
+
+// The value; panics (exit status 101) on error.
+pulse result_unwrap<T, E>(r: Result<T, E>) -> T {
+    probe r {
+        diverge Result.Ok(v) -> { return v }
+        diverge Result.Err(e) -> { panic("result_unwrap called on an Err") }
+    }
+}
+
+// Like result_unwrap, but panics with your message.
+pulse result_expect<T, E>(r: Result<T, E>, msg: str) -> T {
+    probe r {
+        diverge Result.Ok(v) -> { return v }
+        diverge Result.Err(e) -> { panic(msg) }
+    }
+}
+
+// Ok(v) -> Some(v); Err(_) -> None. Drops the error.
+pulse result_to_option<T, E>(r: Result<T, E>) -> Option<T> {
+    probe r {
+        diverge Result.Ok(v) -> { return Option.Some(v) }
+        diverge Result.Err(e) -> { return Option.None }
+    }
+    return Option.None
+}
+
+// Err(e) -> Some(e); Ok(_) -> None.
+pulse result_err_to_option<T, E>(r: Result<T, E>) -> Option<E> {
+    probe r {
+        diverge Result.Ok(v) -> { return Option.None }
+        diverge Result.Err(e) -> { return Option.Some(e) }
+    }
+    return Option.None
+}

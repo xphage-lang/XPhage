@@ -1,0 +1,40 @@
+// Nexus implemented FOR primitives: Ord (with a default method) and Default for int and str,
+// reached through generic bounds (`a.cmp(b)` with a: T, `T::default()`).
+nexus Ord {
+    cmp(other: Self) -> int
+    lt(other: Self) -> bool { return self.cmp(other) < 0 }
+}
+nexus Default { pulse default() -> Self }
+impl Ord for int {
+    cmp(other: Self) -> int {
+        if self < other { return -1 }
+        if self > other { return 1 }
+        return 0
+    }
+}
+impl Ord for str {
+    cmp(other: Self) -> int {
+        if self < other { return -1 }
+        if self > other { return 1 }
+        return 0
+    }
+}
+impl Default for int { pulse default() -> Self { return 0 } }
+impl Default for str { pulse default() -> Self { return "" } }
+
+pulse max_of<T: Ord>(a: T, b: T) -> T {
+    if a.cmp(b) >= 0 { return a }
+    return b
+}
+pulse is_less<T: Ord>(a: T, b: T) -> bool { return a.lt(b) }
+pulse zero<T: Default>(seed: T) -> T { return T::default() }
+
+pulse main() {
+    beam max_of(3, 9)
+    beam max_of("pear", "apple")
+    beam is_less(2, 5)
+    beam is_less("b", "a")
+    beam zero(41)
+    atom e = zero("x")
+    beam f"[{e}]"
+}

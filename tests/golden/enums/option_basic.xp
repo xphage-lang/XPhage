@@ -1,0 +1,24 @@
+enum Option<T> {
+    Some(T)
+    None
+}
+
+pulse find(id: int) -> Option<int> {
+    if id == 1 {
+        return Option.Some(42)
+    }
+    return Option.None
+}
+
+pulse main() {
+    atom a = find(1)
+    probe a {
+        diverge Option.Some(v) -> { beam f"some={v}" }
+        diverge Option.None -> { beam f"none" }
+    }
+    atom b = find(2)
+    probe b {
+        diverge Option.Some(v) -> { beam f"some={v}" }
+        diverge Option.None -> { beam f"none" }
+    }
+}

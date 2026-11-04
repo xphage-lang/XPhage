@@ -1,0 +1,31 @@
+enum Result<T, E> { Ok(T)  Err(E) }
+
+pulse read(path: str) -> Result<str, str> {
+    if path == "a.txt" { return Result.Ok("alpha") }
+    if path == "b.txt" { return Result.Ok("beta") }
+    return Result.Err(f"no such file: {path}")
+}
+pulse both(p1: str, p2: str) -> Result<str, str> {
+    atom x = read(p1)?
+    atom y = read(p2)?
+    return Result.Ok(f"{x}+{y}")
+}
+pulse level2(p1: str, p2: str) -> Result<str, str> {
+    atom joined = both(p1, p2)?
+    return Result.Ok(f"[{joined}]")
+}
+pulse level3(p1: str, p2: str) -> Result<str, str> {
+    atom wrapped = level2(p1, p2)?
+    return Result.Ok(f"<{wrapped}>")
+}
+pulse show(r: Result<str, str>) {
+    probe r {
+        diverge Result.Ok(v) -> { beam f"ok {v}" }
+        diverge Result.Err(e) -> { beam f"err {e}" }
+    }
+}
+pulse main() {
+    show(level3("a.txt", "b.txt"))
+    show(level3("a.txt", "zzz"))
+    show(level3("nope", "b.txt"))
+}

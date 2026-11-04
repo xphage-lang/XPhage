@@ -1,0 +1,11 @@
+forge Account { balance: int }
+impl Account {
+    pulse left_after(self, amount: int) -> int {
+        return self.balance - amount
+    }
+}
+pulse main() {
+    atom a: Account = spawn Account { balance: 50 }
+    atom r = a.left_after(20)
+    beam f"left {r}"
+}

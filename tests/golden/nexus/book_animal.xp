@@ -1,0 +1,28 @@
+// Language book §8.2 — nexus, impl-for, implicit `self`, static dispatch through a bound.
+nexus Animal {
+    speak() -> str
+    name() -> str
+    legs() -> int
+}
+forge Dog { name: str = ""  breed: str = "" }
+forge Cat { name: str = "" }
+impl Animal for Dog {
+    speak() -> str { return "Woof" }
+    name() -> str { return self.name }
+    legs() -> int { return 4 }
+}
+impl Animal for Cat {
+    speak() -> str { return "Meow" }
+    name() -> str { return self.name }
+    legs() -> int { return 4 }
+}
+pulse describe<T: Animal>(a: T) -> str {
+    return f"{a.name()} says {a.speak()} on {a.legs()} legs"
+}
+pulse main() {
+    atom d = spawn Dog { name: "Rex" }
+    atom c = spawn Cat { name: "Tom" }
+    beam d.speak()
+    beam describe(d)
+    beam describe(c)
+}

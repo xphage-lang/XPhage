@@ -1,0 +1,30 @@
+~link "core"
+
+pulse find(k: int) -> Option<int> {
+    if k == 1 { return Option.Some(10) }
+    if k == 2 { return Option.Some(20) }
+    return Option.None
+}
+pulse parse(s: str) -> Result<int, str> {
+    if s == "7" { return Result.Ok(7) }
+    return Result.Err("not a number")
+}
+
+pulse main() {
+    atom good = parse("7")
+    atom bad = parse("x")
+    atom s1 = option_is_some(find(1))
+    atom n9 = option_is_none(find(9))
+    beam f"some1={s1} none9={n9}"
+    atom o1 = option_unwrap_or(find(1), 0)
+    atom o9 = option_unwrap_or(find(9), -1)
+    beam f"or1={o1} or9={o9}"
+    atom u2 = option_unwrap(find(2))
+    beam f"unwrap2={u2}"
+    atom isok = result_is_ok(good)
+    atom iserr = result_is_err(bad)
+    beam f"ok={isok} err={iserr}"
+    atom r1 = result_unwrap_or(good, 0)
+    atom r2 = result_unwrap_or(bad, 99)
+    beam f"uo={r1} uo2={r2}"
+}

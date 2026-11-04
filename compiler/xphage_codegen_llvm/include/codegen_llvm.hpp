@@ -18,7 +18,20 @@ struct LLVMConfig {
     std::string  features   = "";
     int          opt_level  = 2;    // 0=none 1=less 2=default 3=aggressive
     bool         debug_info = false;
-    bool         pic        = false;
+    // Defaults to true (position-independent code) — caught by
+    // actually linking real generated output for the first time: with
+    // this false, LLVM's TargetMachine leaves the relocation model
+    // unset, which falls back to LLVM's own static-relocation default
+    // — but the system `cc` this backend shells out to for the final
+    // link step (see link_binary below) links a PIE executable by
+    // default on this (and virtually every modern Linux) toolchain,
+    // which requires PIC object code. The mismatch only actually
+    // surfaces once generated code touches something needing a real
+    // relocation against .rodata (e.g. a string literal) — a
+    // plain-arithmetic program with no strings linked successfully
+    // even with the old `false` default, which is why this wasn't
+    // caught immediately.
+    bool         pic        = true;
     bool         emit_llvm_ir = false;   // write .ll alongside .o
     bool         verbose    = false;
 };

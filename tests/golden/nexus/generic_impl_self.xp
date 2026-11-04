@@ -1,0 +1,11 @@
+forge Box<T> { v: T }
+impl<T> Box<T> {
+    get() -> T { return self.v }
+    rebox(x: T) -> Self { return spawn Self { v: x } }
+}
+pulse main() {
+    atom b = spawn Box<int> { v: 5 }
+    atom c = b.rebox(9)
+    beam b.get()
+    beam c.get()
+}

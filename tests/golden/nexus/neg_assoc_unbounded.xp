@@ -1,0 +1,5 @@
+nexus Default { pulse default() -> Self }
+forge P { x: int = 0 }
+impl Default for P { pulse default() -> Self { return spawn Self { x: 7 } } }
+pulse make<T>(seed: T) -> T { return T::default() }
+pulse main() { atom b = spawn P { x: 1 }  atom c = make(b)  beam c.x }

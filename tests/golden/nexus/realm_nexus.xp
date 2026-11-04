@@ -1,0 +1,9 @@
+realm Zoo {
+    nexus Noisy { sound() -> str  shout() -> str { return f"{self.sound()}!" } }
+    forge Lion { n: int = 0 }
+    impl Noisy for Lion { sound() -> str { return "roar" } }
+}
+pulse main() {
+    atom l = spawn Zoo::Lion { }
+    beam l.shout()
+}

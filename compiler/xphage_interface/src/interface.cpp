@@ -10,6 +10,8 @@
 #include "../../xphage_parse/include/parser.hpp"
 #include "../../xphage_middle/include/ir_lower.hpp"
 #include "../../xphage_sema/include/semantic_analyzer.hpp"
+#include "../../xphage_sema/include/trait_expand.hpp"
+#include "../../xphage_sema/include/numeric_types.hpp"
 #include "../../xphage_generics/include/monomorphize.hpp"
 #include "../../xphage_codegen_transpiler/include/codegen_transpiler.hpp"
 #include "../../xphage_codegen_llvm/include/codegen_llvm.hpp"
@@ -28,6 +30,30 @@
 #endif
 
 namespace xphage::interface {
+
+// Renders diagnostics produced by a pass that runs after semantic analysis
+// (the numeric typer) exactly like the analyzer's own: source line + caret.
+// Returns true when any of them is an error.
+static bool report_pass_diagnostics(const std::vector<xphage::diag::Diagnostic>& diags,
+                                    CompileResult& res, bool emit_warnings) {
+    bool any_error = false;
+    for (auto& d : diags) {
+        std::string source_line;
+        if (!d.span.file.empty()) {
+            std::ifstream f(d.span.file);
+            std::string line;
+            uint32_t ln = 1;
+            while (std::getline(f, line)) {
+                if (ln == d.span.line) { source_line = line; break; }
+                ln++;
+            }
+        }
+        std::string formatted = xphage::diag::format_diagnostic(d, source_line, true);
+        if (d.severity == xphage::diag::Severity::Error) { res.errors.push_back(formatted); any_error = true; }
+        else if (emit_warnings) res.warnings.push_back(formatted);
+    }
+    return any_error;
+}
 
 static std::string read_file(const std::string& p) {
     std::ifstream f(p);
@@ -206,6 +232,8 @@ CompileResult compile(const CompileConfig& cfg) {
     // See compile_xp() for the full rationale — same standalone
     // pass, same diagnostic formatting.
     {
+        xphage::sema::canonicalize_type_names(ast);   // i64/f64/byte -> int/float/u8
+        xphage::sema::expand_traits(ast);   // nexus default methods + `Self`
         xphage::sema::SemanticAnalyzer analyzer(src);
         auto analysis = analyzer.analyze(ast);
         for (auto& d : analysis.diagnostics) {
@@ -247,6 +275,11 @@ CompileResult compile(const CompileConfig& cfg) {
         ast = std::move(mono.program);
         for (auto& e : mono.errors) res.errors.push_back(e.message);
         if (!mono.errors.empty()) return res;
+        xphage::sema::lower_assoc_functions(ast);   // Type::fn() -> free function
+        // Sized numeric types: canonical names, literal typing, strictness
+        // errors, and the per-expression annotations every backend reads.
+        if (report_pass_diagnostics(xphage::sema::annotate_numeric_types(ast), res, cfg.emit_warnings))
+            return res;
     }
 
     // 5. IR lowering
@@ -303,9 +336,9 @@ CompileResult compile(const CompileConfig& cfg) {
 #else
         std::string cc;
 #ifdef _WIN32
-        cc = "g++ \"" + cpp_out + "\" -o \"" + cfg.output_path + ".exe\" -std=c++17 -pthread";
+        cc = "g++ \"" + cpp_out + "\" -o \"" + cfg.output_path + ".exe\" -std=c++17 -fwrapv -Wno-overflow -pthread";
 #else
-        cc = "c++ \"" + cpp_out + "\" -o \"" + cfg.output_path + "\" -std=c++17 -pthread -lstdc++fs";
+        cc = "c++ \"" + cpp_out + "\" -o \"" + cfg.output_path + "\" -std=c++17 -fwrapv -Wno-overflow -pthread -lstdc++fs";
 #endif
         if (cfg.optimize) cc += " -O3";
         for (auto& lib : cfg.link_libs) cc += " " + lib;
@@ -351,9 +384,9 @@ CompileResult compile(const CompileConfig& cfg) {
 #else
     std::string cc;
 #ifdef _WIN32
-    cc = "g++ \"" + cpp_out + "\" -o \"" + cfg.output_path + ".exe\" -std=c++17 -pthread";
+    cc = "g++ \"" + cpp_out + "\" -o \"" + cfg.output_path + ".exe\" -std=c++17 -fwrapv -Wno-overflow -pthread";
 #else
-    cc = "c++ \"" + cpp_out + "\" -o \"" + cfg.output_path + "\" -std=c++17 -pthread -lstdc++fs";
+    cc = "c++ \"" + cpp_out + "\" -o \"" + cfg.output_path + "\" -std=c++17 -fwrapv -Wno-overflow -pthread -lstdc++fs";
 #endif
     if (cfg.optimize) cc += " -O3";
     for (auto& lib : cfg.link_libs) cc += " " + lib;
@@ -541,6 +574,8 @@ static std::string find_library_root(const std::string& configured) {
 // from multiple files or accidentally repeated — re-parsing and
 // re-merging the same .xh twice would otherwise produce duplicate
 // forge/pulse declarations and a confusing "redefinition" error.
+static const std::unordered_set<std::string>& stdlib_module_names();
+
 static Program resolve_module(const std::string& name,
                                const std::string& library_root,
                                std::unordered_set<std::string>& loaded,
@@ -561,7 +596,23 @@ static Program resolve_module(const std::string& name,
         return {};
     }
 
-    return parse_file(xh_path.string(), errors);
+    Program own = parse_file(xh_path.string(), errors);
+
+    // A stdlib module can itself `~link` another one (collections returns
+    // Option, which lives in core). Load those dependencies too, and put
+    // them BEFORE this module's own declarations so a type is always
+    // declared ahead of its first use. `loaded` (shared across the whole
+    // compile) keeps a dependency that two modules both name from being
+    // merged twice.
+    Program merged;
+    for (auto& n : own) {
+        if (!n || n->kind != NodeKind::LinkStmt) continue;
+        if (!stdlib_module_names().count(n->value)) continue;
+        auto dep = resolve_module(n->value, library_root, loaded, errors);
+        merged.insert(merged.end(), dep.begin(), dep.end());
+    }
+    merged.insert(merged.end(), own.begin(), own.end());
+    return merged;
 }
 
 // Walks the program for every LinkStmt, resolves modules it
@@ -572,7 +623,7 @@ static Program resolve_module(const std::string& name,
 // names are resolved here.
 static const std::unordered_set<std::string>& stdlib_module_names() {
     static const std::unordered_set<std::string> names = {
-        "io", "math", "string", "collections", "net", "os", "crypt", "ai", "solver"
+        "core", "io", "math", "string", "collections", "net", "os", "crypt", "ai", "solver"
     };
     return names;
 }
@@ -762,6 +813,8 @@ CompileResult compile_xp(const CompileConfig& cfg) {
     // letting them through to the generated C++ and surfacing as a
     // g++ error pointing at internal, synthesized code.
     {
+        xphage::sema::canonicalize_type_names(ast);   // i64/f64/byte -> int/float/u8
+        xphage::sema::expand_traits(ast);   // nexus default methods + `Self`
         xphage::sema::SemanticAnalyzer analyzer(src);
         auto analysis = analyzer.analyze(ast);
         for (auto& d : analysis.diagnostics) {
@@ -798,6 +851,11 @@ CompileResult compile_xp(const CompileConfig& cfg) {
         ast = std::move(mono.program);
         for (auto& e : mono.errors) res.errors.push_back(e.message);
         if (!mono.errors.empty()) return res;
+        xphage::sema::lower_assoc_functions(ast);   // Type::fn() -> free function
+        // Sized numeric types: canonical names, literal typing, strictness
+        // errors, and the per-expression annotations every backend reads.
+        if (report_pass_diagnostics(xphage::sema::annotate_numeric_types(ast), res, cfg.emit_warnings))
+            return res;
     }
 
     if (cfg.verbose) {
@@ -886,7 +944,7 @@ CompileResult compile_xp(const CompileConfig& cfg) {
         res.warnings.push_back("iOS: generated C++ at " + cpp_out);
 #else
         std::string cc_x = "c++ \"" + cpp_out + "\" -o \"" + cfg.output_path
-                       + "\" -std=c++17 -pthread -lstdc++fs";
+                       + "\" -std=c++17 -fwrapv -Wno-overflow -pthread -lstdc++fs";
         if (cfg.optimize) cc_x += " -O3";
         for (auto& lib : cfg.link_libs) cc_x += " " + lib;
         if (cfg.verbose) std::cout << "[cc] " << cc_x << "\n";
@@ -919,7 +977,7 @@ CompileResult compile_xp(const CompileConfig& cfg) {
     res.warnings.push_back("iOS: generated C++ at " + cpp_out);
 #else
     std::string cc = "c++ \"" + cpp_out + "\" -o \"" + cfg.output_path
-                   + "\" -std=c++17 -pthread -lstdc++fs";
+                   + "\" -std=c++17 -fwrapv -Wno-overflow -pthread -lstdc++fs";
     if (cfg.optimize) cc += " -O3";
     for (auto& lib : cfg.link_libs) cc += " " + lib;
     if (cfg.verbose) std::cout << "[cc] " << cc << "\n";
@@ -997,6 +1055,8 @@ CompileResult compile_multi(const std::vector<std::string>& paths,
                                                    // files; per-diagnostic source
                                                    // lines are read from each
                                                    // diagnostic's own span.file below
+        xphage::sema::canonicalize_type_names(merged);
+        xphage::sema::expand_traits(merged);
         auto analysis = analyzer.analyze(merged);
         for (auto& d : analysis.diagnostics) {
             std::string source_line;
@@ -1026,6 +1086,9 @@ CompileResult compile_multi(const std::vector<std::string>& paths,
         merged = std::move(mono.program);
         for (auto& e : mono.errors) res.errors.push_back(e.message);
         if (!mono.errors.empty()) return res;
+        xphage::sema::lower_assoc_functions(merged);
+        if (report_pass_diagnostics(xphage::sema::annotate_numeric_types(merged), res, base_cfg.emit_warnings))
+            return res;
     }
 
     if (try_llvm_backend(merged, base_cfg, res, t0)) return res;
@@ -1062,7 +1125,7 @@ CompileResult compile_multi(const std::vector<std::string>& paths,
 
 #if !(defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
         std::string cc_x = "c++ \"" + cpp_out + "\" -o \"" + base_cfg.output_path
-                       + "\" -std=c++17 -pthread -lstdc++fs";
+                       + "\" -std=c++17 -fwrapv -Wno-overflow -pthread -lstdc++fs";
         if (base_cfg.optimize) cc_x += " -O3";
         for (auto& lib : base_cfg.link_libs) cc_x += " " + lib;
         if (base_cfg.verbose) std::cout << "[cc] " << cc_x << "\n";
@@ -1089,7 +1152,7 @@ CompileResult compile_multi(const std::vector<std::string>& paths,
 
 #if !(defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
     std::string cc = "c++ \"" + cpp_out + "\" -o \"" + base_cfg.output_path
-                   + "\" -std=c++17 -pthread -lstdc++fs";
+                   + "\" -std=c++17 -fwrapv -Wno-overflow -pthread -lstdc++fs";
     if (base_cfg.optimize) cc += " -O3";
     for (auto& lib : base_cfg.link_libs) cc += " " + lib;
     if (base_cfg.verbose) std::cout << "[cc] " << cc << "\n";

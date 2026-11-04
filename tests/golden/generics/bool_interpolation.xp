@@ -1,0 +1,4 @@
+pulse main() {
+    atom b: bool = true
+    beam f"b={b}"
+}

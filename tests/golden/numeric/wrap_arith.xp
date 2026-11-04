@@ -1,0 +1,38 @@
+pulse main() {
+    atom a: u8 = 200
+    atom b: u8 = 100
+    beam a + b
+    beam a - 250u8
+    beam a * b
+    atom c: i8 = 127
+    beam c + 1
+    atom d: i32 = 2147483647
+    beam d + 1
+    atom e: u32 = 0
+    beam e - 1
+    atom f: u64 = 0xFFFFFFFFFFFFFFFF
+    beam f
+    beam f + 1
+    atom g: u16 = 65535
+    beam g + g
+    atom h: u32 = 7
+    beam h << 2
+    beam h << 33
+    beam 255u8 >> 4
+    atom neg: i8 = -128
+    beam -neg
+    beam cast(300, u8)
+    beam cast(-1, u32)
+    beam cast(3.99, i32)
+    beam cast(-3.99, i32)
+    beam cast(1.0e30, i32)
+    beam cast(-5.5, u8)
+    beam cast(200u8, i8)
+    beam cast(-1i8, u64)
+    atom x: f32 = 0.1
+    beam x
+    beam x * 3
+    beam f"{a} {c} {x} {a + b}"
+    beam 5u8 < 6u8
+    beam 255u8 > 1u8
+}

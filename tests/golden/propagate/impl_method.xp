@@ -1,0 +1,23 @@
+enum Result<T, E> { Ok(T)  Err(E) }
+forge Account { balance: int }
+impl Account {
+    pulse withdraw(self, amount: int) -> Result<int, str> {
+        if amount > self.balance { return Result.Err("insufficient funds") }
+        return Result.Ok(self.balance - amount)
+    }
+    pulse fee_then_withdraw(self, amount: int) -> Result<int, str> {
+        atom after = self.withdraw(amount)?
+        return Result.Ok(after - 1)
+    }
+}
+pulse show(r: Result<int, str>) {
+    probe r {
+        diverge Result.Ok(v) -> { beam f"left {v}" }
+        diverge Result.Err(e) -> { beam f"err {e}" }
+    }
+}
+pulse main() {
+    atom a: Account = spawn Account { balance: 50 }
+    show(a.fee_then_withdraw(20))
+    show(a.fee_then_withdraw(80))
+}

@@ -1,3 +1,5 @@
+#include <cctype>
+#include "../include/trait_expand.hpp"
 #include "../include/semantic_analyzer.hpp"
 #include <sstream>
 #include <unordered_set>
@@ -93,6 +95,7 @@ void SemanticAnalyzer::seed_builtins() {
     };
     static const char* core_names[] = {
         // Always available — core_ops.cpp / runtime.hpp, no ~link required
+        "panic",
         "str_trim", "str_upper", "str_lower", "str_len", "str_replace",
         "str_contains", "str_starts_with", "str_ends_with",
         "str_to_int", "str_to_float", "int_to_str", "float_to_str",
@@ -145,6 +148,10 @@ void SemanticAnalyzer::warning(const std::string& code, const Span& span,
 // ── Top-level entry point ─────────────────────────────────────────
 AnalysisResult SemanticAnalyzer::analyze(const Program& prog) {
     diags_.clear();
+    enum_decl_nodes_.clear();
+    current_fn_name_.clear();
+    current_fn_ret_.clear();
+    current_fn_tparams_.clear();
 
     for (auto& n : prog) collect_impls(n);
     collect_declarations(prog);
@@ -172,11 +179,56 @@ void SemanticAnalyzer::collect_impls(const ASTNodePtr& n) {
     if (n->kind == NodeKind::ImplDecl && !n->value.empty() && !n->extra.empty()) {
         impl_registry_[n->value].insert(n->extra);
     }
+    if (n->kind == NodeKind::ForgeDecl && !n->value.empty()) forge_names_.insert(n->value);
+    if (n->kind == NodeKind::RealmDecl && !n->value.empty()) realm_names_.insert(n->value);
+    if (n->kind == NodeKind::ImplDecl && !n->extra.empty()) {
+        // bare receiver name: `Zoo::Lion` -> `Lion`, `Box<T>` -> `Box`
+        std::string recv = n->extra.substr(0, n->extra.find('<'));
+        size_t cc = recv.rfind("::");
+        if (cc != std::string::npos) recv = recv.substr(cc + 2);
+        for (auto& m : n->children) {
+            if (!m || m->kind != NodeKind::PulseDecl || m->value.empty()) continue;
+            bool has_self = false;
+            for (auto& c : m->children)
+                if (c && c->kind == NodeKind::FieldDecl && c->value == "self") has_self = true;
+            if (!has_self) assoc_fns_[recv].insert(m->value);
+        }
+    }
+    if (n->kind == NodeKind::NexusDecl && !n->value.empty()) {
+        nexus_nodes_[n->value] = n.get();
+        if (!realm_stack_.empty()) {
+            std::string q;
+            for (auto& r : realm_stack_) q += r + "::";
+            nexus_nodes_[q + n->value] = n.get();
+        }
+    }
+    const bool is_realm = n->kind == NodeKind::RealmDecl;
+    if (is_realm) realm_stack_.push_back(n->value);
     for (auto& c : n->children) collect_impls(c);
+    if (is_realm) realm_stack_.pop_back();
+}
+
+std::string SemanticAnalyzer::first_unsatisfied_bound(const std::string& type_name,
+                                                       const std::string& bound) const {
+    size_t start = 0;
+    while (start <= bound.size()) {
+        size_t plus = bound.find('+', start);
+        std::string one = bound.substr(start, plus == std::string::npos ? std::string::npos
+                                                                         : plus - start);
+        if (!one.empty() && !satisfies_one_bound(type_name, one)) return one;
+        if (plus == std::string::npos) break;
+        start = plus + 1;
+    }
+    return "";
 }
 
 bool SemanticAnalyzer::satisfies_bound(const std::string& type_name,
-                                        const std::string& bound_nexus) const {
+                                        const std::string& bound) const {
+    return first_unsatisfied_bound(type_name, bound).empty();
+}
+
+bool SemanticAnalyzer::satisfies_one_bound(const std::string& type_name,
+                                            const std::string& bound_nexus) const {
     if (bound_nexus.empty()) return true;   // no bound to check
     if (type_name.empty() || type_name == "auto") return true; // couldn't infer — don't false-positive
     // XPhage's built-in scalar types are treated as satisfying any
@@ -187,7 +239,10 @@ bool SemanticAnalyzer::satisfies_bound(const std::string& type_name,
     // registry-only check would make `pulse add<T: Numeric>(a: T, b:
     // T) -> T` unusable with XPhage's own primitive numeric types —
     // clearly not the intended meaning of the bound.
-    if (bound_nexus == "Numeric" && (type_name == "int" || type_name == "float")) {
+    if (bound_nexus == "Numeric" &&
+        (type_name == "int" || type_name == "float" || type_name == "i8" || type_name == "i16" ||
+         type_name == "i32" || type_name == "isize" || type_name == "u8" || type_name == "u16" ||
+         type_name == "u32" || type_name == "u64" || type_name == "usize" || type_name == "f32")) {
         return true;
     }
     auto it = impl_registry_.find(bound_nexus);
@@ -305,6 +360,7 @@ void SemanticAnalyzer::collect_one_declaration(const ASTNodePtr& n) {
                 }
             }
             symtab_.declare(sym);
+            enum_decl_nodes_[n->value] = n.get();
             // Each variant's arity/payload-type validation happens at
             // the actual construction site (check_call /
             // check_member, see below) rather than here — collection
@@ -462,8 +518,15 @@ void SemanticAnalyzer::check_program(const Program& prog) {
             // pulses share the same body-checking needs (parameter
             // scoping, self included since parse_field_decl now
             // parses it as a real FieldDecl parameter).
+            check_impl_conformance(n);
+            auto saved_tparams = fn_type_params_;
+            for (auto& c : n->children)
+                if (c && c->kind == NodeKind::TypeParamDecl) fn_type_params_[c->value] = c->extra;
+            struct RestoreTP { std::unordered_map<std::string, std::string>& m, saved;
+                               ~RestoreTP() { m = saved; } } restore_tp{fn_type_params_, saved_tparams};
             for (auto& method : n->children) {
-                if (method) check_pulse_body(method);
+                if (method && method->kind != NodeKind::TypeParamDecl)
+                    check_pulse_body(method, n->extra);
             }
         } else if (n->kind == NodeKind::EnumDecl) {
             // Nothing to check inside an EnumDecl's own children
@@ -473,6 +536,11 @@ void SemanticAnalyzer::check_program(const Program& prog) {
             continue;
         } else if (n->kind == NodeKind::Block) {
             // extern block — no body to check (declarations only)
+            continue;
+        } else if (n->kind == NodeKind::ForgeDecl && !n->children.empty()) {
+            for (auto& f : n->children)
+                if (f && f->kind == NodeKind::FieldDecl)
+                    check_not_nexus_type(f->extra, f->span, "field");
             continue;
         } else if (n->kind == NodeKind::ForgeDecl || n->kind == NodeKind::NexusDecl ||
                    n->kind == NodeKind::GlobalDecl || n->kind == NodeKind::ConstDecl ||
@@ -492,15 +560,317 @@ void SemanticAnalyzer::check_program(const Program& prog) {
     }
 }
 
-void SemanticAnalyzer::check_pulse_body(const ASTNodePtr& pulse_decl) {
+// ── `?` validation ───────────────────────────────────────────────
+namespace {
+
+std::string strip_spaces(const std::string& s) {
+    std::string o;
+    for (char c : s) if (c != ' ') o += c;
+    return o;
+}
+
+// "own T" / "ref T" / "mut_ref T" -> "T": qualifiers change how a value
+// is passed, not what it is.
+std::string strip_qualifiers(std::string t) {
+    for (;;) {
+        if (t.compare(0, 4, "own ") == 0)          t = t.substr(4);
+        else if (t.compare(0, 4, "ref ") == 0)     t = t.substr(4);
+        else if (t.compare(0, 8, "mut_ref ") == 0) t = t.substr(8);
+        else break;
+    }
+    return t;
+}
+
+// Splits "Result<Vec<int>, str>" into base "Result" and top-level
+// arguments {"Vec<int>", "str"}, honouring nested angle brackets. A type
+// with no <...> yields an empty argument list and base == the whole type.
+std::vector<std::string> split_type_args(const std::string& s, std::string& base) {
+    std::vector<std::string> out;
+    size_t lt = s.find('<');
+    if (lt == std::string::npos || s.empty() || s.back() != '>') { base = s; return out; }
+    base = s.substr(0, lt);
+    std::string inner = s.substr(lt + 1, s.size() - lt - 2), cur;
+    int depth = 0;
+    for (char c : inner) {
+        if (c == '<') depth++;
+        if (c == '>') depth--;
+        if (c == ',' && depth == 0) { out.push_back(cur); cur.clear(); }
+        else if (c != ' ') cur += c;
+    }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
+
+bool mentions_word(const std::string& hay, const std::string& word) {
+    if (word.empty()) return false;
+    size_t pos = hay.find(word);
+    while (pos != std::string::npos) {
+        bool l = pos == 0 || !(std::isalnum((unsigned char)hay[pos - 1]) || hay[pos - 1] == '_');
+        size_t e = pos + word.size();
+        bool r = e >= hay.size() || !(std::isalnum((unsigned char)hay[e]) || hay[e] == '_');
+        if (l && r) return true;
+        pos = hay.find(word, pos + 1);
+    }
+    return false;
+}
+
+bool mentions_any(const std::string& hay, const std::vector<std::string>& words) {
+    for (auto& w : words) if (mentions_word(hay, w)) return true;
+    return false;
+}
+
+// Replaces each whole-word occurrence of a type parameter with its argument.
+std::string substitute_type_words(std::string t, const std::vector<std::string>& params,
+                                  const std::vector<std::string>& args) {
+    for (size_t k = 0; k < params.size() && k < args.size(); k++) {
+        std::string out;
+        size_t i = 0;
+        const std::string& p = params[k];
+        while (i < t.size()) {
+            if (t.compare(i, p.size(), p) == 0 && mentions_word(t.substr(i, p.size()), p) &&
+                (i == 0 || !(std::isalnum((unsigned char)t[i - 1]) || t[i - 1] == '_')) &&
+                (i + p.size() >= t.size() || !(std::isalnum((unsigned char)t[i + p.size()]) || t[i + p.size()] == '_'))) {
+                out += args[k];
+                i += p.size();
+            } else {
+                out += t[i++];
+            }
+        }
+        t = out;
+    }
+    return t;
+}
+
+bool is_builtin_scalar(const std::string& t) {
+    return t == "int" || t == "float" || t == "str" || t == "bool";
+}
+
+} // namespace
+
+SemanticAnalyzer::TryShape SemanticAnalyzer::try_shape_of(const std::string& type_str) const {
+    TryShape sh;
+    std::string base;
+    auto args = split_type_args(strip_spaces(strip_qualifiers(type_str)), base);
+    auto it = enum_decl_nodes_.find(base);
+    if (it == enum_decl_nodes_.end()) return sh;
+    const ASTNode* en = it->second;
+
+    std::vector<std::string> params;
+    for (auto& c : en->children)
+        if (c && c->kind == NodeKind::TypeParamDecl) params.push_back(c->value);
+
+    const ASTNode *ok = nullptr, *err = nullptr, *some = nullptr, *none = nullptr;
+    for (auto& v : en->children) {
+        if (!v || v->kind != NodeKind::EnumVariant) continue;
+        if (v->value == "Ok")   ok   = v.get();
+        if (v->value == "Err")  err  = v.get();
+        if (v->value == "Some") some = v.get();
+        if (v->value == "None") none = v.get();
+    }
+    auto payload = [&](const ASTNode* v) {
+        std::string ft = strip_spaces(v->children[0] ? v->children[0]->extra : std::string());
+        return substitute_type_words(ft, params, args);
+    };
+    if (ok && err && ok->children.size() == 1 && err->children.size() == 1) {
+        sh.kind = TryShape::ResultLike;
+        sh.enum_name = base;
+        sh.ok_type = payload(ok);
+        sh.fail_type = payload(err);
+    } else if (some && none && some->children.size() == 1 && none->children.empty()) {
+        sh.kind = TryShape::OptionLike;
+        sh.enum_name = base;
+        sh.ok_type = payload(some);
+    }
+    return sh;
+}
+
+void SemanticAnalyzer::check_propagate(const ASTNodePtr& expr) {
+    const uint32_t ulen = 1; // the `?` token itself
+
+    // 1. Must be inside a pulse: `?` returns from the enclosing function.
+    if (current_fn_name_.empty()) {
+        error("XP2040", expr->span,
+              "the `?` operator can only be used inside a pulse",
+              ulen,
+              std::string("`?` returns early from the enclosing function, so it needs one; "
+                          "top-level statements have nothing to return to"));
+        return;
+    }
+
+    // 2. That pulse must itself return a Result-like / Option-like enum.
+    TryShape fn_shape = try_shape_of(current_fn_ret_);
+    if (fn_shape.kind == TryShape::NotTry) {
+        std::string what = current_fn_ret_.empty()
+            ? "returns nothing"
+            : "returns `" + current_fn_ret_ + "`";
+        error("XP2041", expr->span,
+              "the `?` operator can only be used in a pulse that returns Result or Option, "
+              "but `" + current_fn_name_ + "` " + what,
+              ulen,
+              std::string("change the return type to `Result<T, E>` (or `Option<T>`), or handle the "
+                          "value with `probe` instead of `?`"));
+        return;
+    }
+
+    // 3. Work out the operand's static type where this pass can. It only
+    //    knows a call's type when the callee is a declared pulse, and an
+    //    identifier's when its declaration was annotated; everywhere else
+    //    it stays silent (the backends re-check against real types).
+    if (expr->children.empty() || !expr->children[0]) return;
+    const ASTNodePtr& operand = expr->children[0];
+    std::string operand_ty;
+    std::vector<std::string> callee_tparams;
+    if (operand->kind == NodeKind::CallExpr && !operand->children.empty() && operand->children[0] &&
+        operand->children[0]->kind == NodeKind::Identifier) {
+        if (auto* sym = symtab_.lookup(operand->children[0]->value)) {
+            if (sym->fn_sig) {
+                operand_ty = sym->fn_sig->return_type;
+                for (auto& tp : sym->fn_sig->type_params) callee_tparams.push_back(tp.name);
+            }
+        }
+    } else if (operand->kind == NodeKind::Identifier) {
+        if (auto* sym = symtab_.lookup(operand->value)) operand_ty = sym->type;
+    }
+    if (operand_ty.empty() || operand_ty == "auto") return;
+
+    TryShape op_shape = try_shape_of(operand_ty);
+    if (op_shape.kind == TryShape::NotTry) {
+        // Only complain about types we are SURE are not Result/Option: the
+        // builtin scalars, and a declared enum that lacks the shape. An
+        // unknown/abstract type is left to the backends.
+        std::string ob, sink;
+        split_type_args(strip_spaces(strip_qualifiers(operand_ty)), ob);
+        if (is_builtin_scalar(ob) || (enum_decl_nodes_.count(ob) && !mentions_any(operand_ty, callee_tparams))) {
+            error("XP2042", expr->span,
+                  "the `?` operator can only be applied to a Result or Option, but this value has type `" +
+                  operand_ty + "`",
+                  ulen,
+                  std::string("`?` unwraps the success value and returns the failure early; "
+                              "a plain `" + operand_ty + "` has no failure case"));
+        }
+        return;
+    }
+
+    // 4. Result and Option do not convert into each other.
+    if (op_shape.kind != fn_shape.kind) {
+        std::string op_word = op_shape.kind == TryShape::ResultLike ? "Result" : "Option";
+        std::string fn_word = fn_shape.kind == TryShape::ResultLike ? "Result" : "Option";
+        error("XP2043", expr->span,
+              "cannot use `?` on `" + operand_ty + "` in a pulse that returns `" + current_fn_ret_ + "`",
+              ulen,
+              "`?` does not convert between " + op_word + " and " + fn_word +
+              "; `probe` on the value and build the " + fn_word + " you want");
+        return;
+    }
+
+    // 5. Result -> Result: the error type is carried through unchanged
+    //    (there is no implicit conversion), so it must match exactly.
+    if (op_shape.kind == TryShape::ResultLike) {
+        std::vector<std::string> abstract_names = current_fn_tparams_;
+        abstract_names.insert(abstract_names.end(), callee_tparams.begin(), callee_tparams.end());
+        const std::string a = strip_spaces(op_shape.fail_type), b = strip_spaces(fn_shape.fail_type);
+        if (!a.empty() && !b.empty() && a != b &&
+            !mentions_any(a, abstract_names) && !mentions_any(b, abstract_names)) {
+            error("XP2044", expr->span,
+                  "`?` would return error type `" + a + "`, but `" + current_fn_name_ +
+                  "` returns error type `" + b + "`",
+                  ulen,
+                  std::string("there is no automatic error conversion; change one of the error types "
+                              "so they match, or `probe` and convert the error yourself"));
+        }
+    }
+}
+
+// `?` inside an f-string interpolation. The parser keeps an f-string as raw
+// text (no child nodes), so the analyzer never sees a PropagateExpr there;
+// scan the `{...}` segments for a `?` outside string literals instead. This is
+// rejected uniformly because backends can only realise it differently: an
+// f-string is built inside a helper lambda in the C++ output, where the early
+// return `?` performs would leave the lambda rather than the pulse. The
+// language's meaning must not depend on the backend, so the fix is to bind
+// the value first.
+void SemanticAnalyzer::check_fstring_propagate(const ASTNodePtr& expr) {
+    const std::string& v = expr->value;
+    size_t i = 0;
+    while (i < v.size()) {
+        if (v[i] != '{') { i++; continue; }
+        if (i + 1 < v.size() && v[i + 1] == '{') { i += 2; continue; }   // literal "{{"
+        int depth = 1;
+        bool in_str = false, has_q = false;
+        size_t j = i + 1;
+        for (; j < v.size(); j++) {
+            char c = v[j];
+            if (in_str) {
+                if (c == '\\') j++;
+                else if (c == '"') in_str = false;
+                continue;
+            }
+            if (c == '"') { in_str = true; continue; }
+            if (c == '{') depth++;
+            else if (c == '}') { if (--depth == 0) break; }
+            else if (c == '?') has_q = true;
+        }
+        if (has_q) {
+            error("XP2045", expr->span,
+                  "the `?` operator cannot be used inside an f-string interpolation",
+                  1,
+                  std::string("bind the value first, then interpolate it: `atom v = expr?` and `{v}`"));
+            return;
+        }
+        i = j + 1;
+    }
+}
+
+void SemanticAnalyzer::check_pulse_body(const ASTNodePtr& pulse_decl, const std::string& self_type) {
+    // Remember which pulse we are inside, for `?` (see check_propagate).
+    // Saved/restored because a pulse can be declared inside another
+    // pulse's body: `?` in the inner body returns from the INNER pulse.
+    const std::string              saved_fn_name    = current_fn_name_;
+    const std::string              saved_fn_ret     = current_fn_ret_;
+    const std::vector<std::string> saved_fn_tparams = current_fn_tparams_;
+    current_fn_name_ = pulse_decl->value.empty() ? std::string("<anonymous>") : pulse_decl->value;
+    current_fn_ret_  = pulse_decl->extra2;
+    current_fn_tparams_.clear();
+    for (auto& c : pulse_decl->children)
+        if (c && c->kind == NodeKind::TypeParamDecl) current_fn_tparams_.push_back(c->value);
+
     symtab_.push_scope();
+
+    struct RestoreFnTP { std::unordered_map<std::string, std::string>& m, saved;
+                         ~RestoreFnTP() { m = saved; } } restore_fn_tp{fn_type_params_, fn_type_params_};
+    for (auto& c : pulse_decl->children)
+        if (c && c->kind == NodeKind::TypeParamDecl) fn_type_params_[c->value] = c->extra;
+    check_not_nexus_type(pulse_decl->extra2, pulse_decl->span, "return type");
+    for (auto& c : pulse_decl->children)
+        if (c && c->kind == NodeKind::TypeParamDecl) check_bound_names(c);
+
+    // Impl methods: `self` is always in scope. Methods written the way
+    // the language book writes them (`name() -> str { ... self.x ... }`,
+    // no `pulse`, no explicit `self`) carry no `self` parameter node, so
+    // declare it here; an explicit `self` parameter is declared below
+    // like any other, but typed as the receiver instead of "auto".
+    bool has_explicit_self = false;
+    for (auto& c : pulse_decl->children)
+        if (c && c->kind == NodeKind::FieldDecl && c->value == "self") has_explicit_self = true;
+    if (!self_type.empty() && !has_explicit_self && pulse_decl->kind == NodeKind::MethodDecl) {
+        Symbol self_sym;
+        self_sym.name = "self";
+        self_sym.kind = SymbolKind::Variable;
+        self_sym.type = self_type;
+        self_sym.declared_at = pulse_decl->span;
+        self_sym.is_used = true;
+        symtab_.declare(self_sym);
+    }
 
     for (auto& c : pulse_decl->children) {
         if (c && c->kind == NodeKind::FieldDecl && !c->value.empty()) {
+            if (c->value != "self") check_not_nexus_type(c->extra, c->span, "parameter");
             Symbol sym;
             sym.name = c->value;
             sym.kind = SymbolKind::Variable;
-            sym.type = c->extra.empty() ? "auto" : c->extra;
+            sym.type = c->extra.empty()
+                           ? ((c->value == "self" && !self_type.empty()) ? self_type : std::string("auto"))
+                           : c->extra;
             sym.declared_at = c->span;
             sym.is_used = true; // parameters aren't flagged unused — a
                                  // function signature often needs a
@@ -516,6 +886,171 @@ void SemanticAnalyzer::check_pulse_body(const ASTNodePtr& pulse_decl) {
     }
 
     symtab_.pop_scope();
+    current_fn_name_    = saved_fn_name;
+    current_fn_ret_     = saved_fn_ret;
+    current_fn_tparams_ = saved_fn_tparams;
+}
+
+// ── nexus: usable as a bound, not as a type ───────────────────────
+void SemanticAnalyzer::check_not_nexus_type(const std::string& type_str, const Span& span,
+                                             const char* what) {
+    if (type_str.empty()) return;
+    // strip generic arguments / pointer-ish decoration down to the head name
+    std::string head = type_str;
+    size_t lt = head.find('<');
+    if (lt != std::string::npos) head = head.substr(0, lt);
+    while (!head.empty() && (head.front() == ' ' || head.front() == '&' || head.front() == '*'))
+        head.erase(head.begin());
+    if (nexus_nodes_.count(head)) {
+        error("XP2014", span,
+              std::string(what) + " type `" + head + "` is a nexus, not a type",
+              (uint32_t)head.size(),
+              "a nexus is a compile-time contract: write a generic bound instead, "
+              "e.g. `pulse f<T: " + head + ">(x: T)`. Dynamic dispatch through a "
+              "nexus-typed value is not supported");
+    }
+}
+
+void SemanticAnalyzer::check_bound_names(const ASTNodePtr& tp) {
+    if (!tp || tp->extra.empty()) return;
+    size_t start = 0;
+    const std::string& b = tp->extra;
+    while (start <= b.size()) {
+        size_t plus = b.find('+', start);
+        std::string one = b.substr(start, plus == std::string::npos ? std::string::npos : plus - start);
+        if (!one.empty() && one != "Numeric" && !nexus_nodes_.count(one)) {
+            error("XP2016", tp->span,
+                  "unknown nexus `" + one + "` in the bound of type parameter `" + tp->value + "`",
+                  (uint32_t)one.size(),
+                  "declare it with `nexus " + one + " { ... }` or fix the name");
+        }
+        if (plus == std::string::npos) break;
+        start = plus + 1;
+    }
+}
+
+// ── nexus: impl conformance ───────────────────────────────────────
+void SemanticAnalyzer::check_impl_conformance(const ASTNodePtr& impl) {
+    if (!impl || impl->value.empty()) return;          // inherent impl: nothing to conform to
+    auto nit = nexus_nodes_.find(impl->value);
+    if (nit == nexus_nodes_.end()) {
+        error("XP2016", impl->span, "unknown nexus `" + impl->value + "`",
+              (uint32_t)impl->value.size(),
+              "declare it with `nexus " + impl->value + " { ... }`");
+        return;
+    }
+    const ASTNode* nx = nit->second;
+    const std::string& recv = impl->extra;
+
+    auto is_method = [](const ASTNodePtr& m) {
+        return m && (m->kind == NodeKind::MethodDecl || m->kind == NodeKind::PulseDecl) &&
+               !m->value.empty();
+    };
+    // A member written with `pulse` and without a `self` parameter has no
+    // receiver: an associated function (`Type::f()` / `T::f()`), not a method.
+    auto is_assoc = [](const ASTNode& m) {
+        if (m.kind != NodeKind::PulseDecl) return false;
+        for (auto& c : m.children)
+            if (c && c->kind == NodeKind::FieldDecl && c->value == "self") return false;
+        return true;
+    };
+    auto has_block = [](const ASTNode& m) {
+        for (auto& c : m.children) if (c && c->kind == NodeKind::Block) return true;
+        return false;
+    };
+    auto params_of = [](const ASTNode& m) {
+        std::vector<const ASTNode*> ps;
+        for (auto& c : m.children)
+            if (c && c->kind == NodeKind::FieldDecl && c->value != "self") ps.push_back(c.get());
+        return ps;
+    };
+    // Realm prefixes are not part of a type's identity for conformance:
+    // `Self` expands to the realm-qualified receiver (`Zoo::Lion`) while a
+    // nexus written elsewhere names the bare type.
+    auto strip_realms = [](const std::string& t) {
+        std::string out;
+        size_t i = 0;
+        while (i < t.size()) {
+            size_t j = i;
+            while (j < t.size() && (std::isalnum((unsigned char)t[j]) || t[j] == '_')) j++;
+            if (j > i && j + 1 < t.size() && t[j] == ':' && t[j + 1] == ':') { i = j + 2; continue; }
+            if (j == i) { out += t[i++]; continue; }
+            out += t.substr(i, j - i);
+            i = j;
+        }
+        return out;
+    };
+    auto norm_ret = [&](const std::string& r) {
+        std::string t = strip_realms(replace_self_type(r, recv));
+        return t.empty() ? std::string("void") : t;
+    };
+
+    std::unordered_map<std::string, const ASTNode*> provided;
+    for (auto& m : impl->children) if (is_method(m)) provided[m->value] = m.get();
+
+    std::unordered_set<std::string> declared;
+    for (auto& req : nx->children) {
+        if (!req || (req->kind != NodeKind::MethodDecl && req->kind != NodeKind::PulseDecl) ||
+            req->value.empty()) continue;
+        declared.insert(req->value);
+        auto pit = provided.find(req->value);
+        if (pit == provided.end()) {
+            if (!has_block(*req)) {
+                error("XP2015", impl->span,
+                      "`impl " + impl->value + " for " + recv + "` is missing method `" +
+                          req->value + "`",
+                      (uint32_t)impl->value.size(),
+                      "`" + impl->value + "` requires `" + req->value + "`; add it to this impl");
+            }
+            continue;
+        }
+        const ASTNode* got = pit->second;
+        if (is_assoc(*req) != is_assoc(*got)) {
+            error("XP2017", got->span,
+                  "`" + req->value + "` is " +
+                      std::string(is_assoc(*req) ? "an associated function (no `self`)" : "a method (takes `self`)") +
+                      " in nexus `" + impl->value + "` but " +
+                      std::string(is_assoc(*got) ? "an associated function" : "a method") + " in this impl",
+                  (uint32_t)req->value.size(),
+                  is_assoc(*req) ? "write it as `pulse " + req->value + "(...)` with no `self` parameter"
+                                 : "drop the `pulse` keyword or add a `self` parameter");
+            continue;
+        }
+        auto want_ps = params_of(*req);
+        auto got_ps  = params_of(*got);
+        if (want_ps.size() != got_ps.size()) {
+            error("XP2017", got->span,
+                  "method `" + req->value + "` takes " + std::to_string(got_ps.size()) +
+                      " parameter(s) but nexus `" + impl->value + "` declares " +
+                      std::to_string(want_ps.size()),
+                  (uint32_t)req->value.size());
+            continue;
+        }
+        for (size_t i = 0; i < want_ps.size(); i++) {
+            std::string w = strip_realms(replace_self_type(want_ps[i]->extra, recv));
+            const std::string g = strip_realms(got_ps[i]->extra);
+            if (!w.empty() && !g.empty() && w != g) {
+                error("XP2017", got_ps[i]->span,
+                      "parameter `" + got_ps[i]->value + "` of `" + req->value + "` has type `" + g +
+                          "` but nexus `" + impl->value + "` declares `" + w + "`",
+                      (uint32_t)g.size());
+            }
+        }
+        if (norm_ret(req->extra2) != norm_ret(got->extra2)) {
+            error("XP2017", got->span,
+                  "method `" + req->value + "` returns `" + norm_ret(got->extra2) +
+                      "` but nexus `" + impl->value + "` declares `" + norm_ret(req->extra2) + "`",
+                  (uint32_t)req->value.size());
+        }
+    }
+    for (auto& m : impl->children) {
+        if (is_method(m) && !declared.count(m->value)) {
+            error("XP2018", m->span,
+                  "method `" + m->value + "` is not a member of nexus `" + impl->value + "`",
+                  (uint32_t)m->value.size(),
+                  "move it to an inherent `impl " + recv + " { ... }` block");
+        }
+    }
 }
 
 void SemanticAnalyzer::check_block(const ASTNodePtr& block) {
@@ -530,6 +1065,7 @@ void SemanticAnalyzer::check_stmt(const ASTNodePtr& stmt) {
     switch (stmt->kind) {
         case NodeKind::AtomDecl:
         case NodeKind::ShadowDecl: {
+            check_not_nexus_type(stmt->extra, stmt->span, "variable");
             if (!stmt->children.empty() && stmt->children[0]) {
                 check_expr(stmt->children[0]);
             }
@@ -693,9 +1229,64 @@ void SemanticAnalyzer::check_stmt(const ASTNodePtr& stmt) {
             break;
         }
 
+        case NodeKind::ProbeStmt: {
+            // probe subject { diverge Enum.Variant(a, b) -> body ... }
+            //
+            // children[0] is the subject expression; every other child
+            // is a ProbeArm. A destructuring pattern
+            // (`Enum.Variant(a, b)`) introduces the names a, b for the
+            // duration of THAT ARM'S body only, so each arm gets its own
+            // scope, exactly like a for-loop variable (see ForStmt). The
+            // parser stores the names comma-joined in attrs["bindings"].
+            //
+            // Previously ProbeStmt fell through to the generic default
+            // below, which walks expression children but never opens a
+            // scope or declares anything: a payload binding was invisible
+            // to the analyzer, so `diverge Option.Some(v) -> use(v)` was
+            // rejected with "cannot find value `v`" (an f-string body
+            // happened to mask this because it is not identifier-checked).
+            // That made nested matching — Result<Option<T>, E>, the exact
+            // shape a Result-based stdlib returns — impossible to write.
+            if (!stmt->children.empty() && stmt->children[0]) {
+                check_expr(stmt->children[0]);
+            }
+            for (size_t i = 1; i < stmt->children.size(); i++) {
+                auto& arm = stmt->children[i];
+                if (!arm) continue;
+                symtab_.push_scope();
+                auto bit = arm->attrs.find("bindings");
+                if (bit != arm->attrs.end() && !bit->second.empty()) {
+                    size_t start = 0;
+                    const std::string& joined = bit->second;
+                    while (start <= joined.size()) {
+                        size_t comma = joined.find(',', start);
+                        std::string name = joined.substr(
+                            start, comma == std::string::npos ? std::string::npos : comma - start);
+                        if (!name.empty()) {
+                            Symbol sym;
+                            sym.name = name;
+                            sym.kind = SymbolKind::Variable;
+                            sym.type = "auto";
+                            sym.declared_at = arm->span;
+                            sym.is_used = true; // a pattern binding may legitimately go unused
+                            symtab_.declare(sym);
+                        }
+                        if (comma == std::string::npos) break;
+                        start = comma + 1;
+                    }
+                }
+                for (auto& c : arm->children) {
+                    if (c && c->kind == NodeKind::Block) check_block(c);
+                    else if (c) check_expr(c);
+                }
+                symtab_.pop_scope();
+            }
+            break;
+        }
+
         default: {
-            // Statement kinds not specifically handled above (probe/
-            // diverge, quantum, chronos, ether, vortex, matrix,
+            // Statement kinds not specifically handled above (quantum,
+            // chronos, ether, vortex, matrix,
             // synapse, absorb, link, use, realm-nested decls, etc.)
             // still have their expression-typed children walked, so
             // a call/identifier deep inside one of these is still
@@ -727,11 +1318,19 @@ std::string SemanticAnalyzer::check_expr(const ASTNodePtr& expr) {
                             // is intentionally out of scope for this
                             // pass — see check_call for what IS checked
 
-        case NodeKind::IntLit:    return "int";
-        case NodeKind::FloatLit:  return "float";
+        case NodeKind::IntLit:
+        case NodeKind::FloatLit: {
+            // an explicit suffix (`3u8`, `1.5f32`) fixes the type; i64/f64 are int/float
+            auto sfx = expr->attrs.find("suffix");
+            if (sfx != expr->attrs.end())
+                return sfx->second == "i64" ? "int" : sfx->second == "f64" ? "float" : sfx->second;
+            return expr->kind == NodeKind::IntLit ? "int" : "float";
+        }
         case NodeKind::BoolLit:   return "bool";
-        case NodeKind::StringLit:
-        case NodeKind::FStringLit: return "str";
+        case NodeKind::StringLit: return "str";
+        case NodeKind::FStringLit:
+            check_fstring_propagate(expr);
+            return "str";
         case NodeKind::NullLit:   return "auto";
 
         case NodeKind::BinaryOp:
@@ -767,9 +1366,17 @@ std::string SemanticAnalyzer::check_expr(const ASTNodePtr& expr) {
         case NodeKind::CastExpr:
         case NodeKind::RangeExpr:
         case NodeKind::PipelineExpr:
-        case NodeKind::AwaitExpr:
+        case NodeKind::AwaitExpr: {
+            for (auto& c : expr->children) check_expr(c);
+            return "auto";
+        }
+
+        // Its own case: PropagateExpr used to share the block above with
+        // several unrelated expression kinds, and `?` validation must run
+        // for `?` only.
         case NodeKind::PropagateExpr: {
             for (auto& c : expr->children) check_expr(c);
+            check_propagate(expr);
             return "auto";
         }
 
@@ -802,7 +1409,67 @@ void SemanticAnalyzer::check_identifier(const ASTNodePtr& n) {
           (uint32_t)n->value.size(), help);
 }
 
+// `Type::f(...)` / `T::f(...)`: the head segment names either a type parameter
+// (then one of its bounds' nexus must declare `f` as an associated function) or
+// a forge/primitive (then it must have an impl providing `f`). A head that is a
+// realm or anything else is an ordinary path and is left to the other checks.
+void SemanticAnalyzer::check_assoc_path_call(const ASTNodePtr& call) {
+    if (!call || call->children.empty() || !call->children[0] ||
+        call->children[0]->kind != NodeKind::PathExpr) return;
+    const ASTNode& callee = *call->children[0];
+    std::vector<std::string> segs;
+    for (size_t i = 0;;) {
+        size_t j = callee.value.find("::", i);
+        if (j == std::string::npos) { segs.push_back(callee.value.substr(i)); break; }
+        segs.push_back(callee.value.substr(i, j - i));
+        i = j + 2;
+    }
+    if (segs.size() < 2) return;
+    const std::string& fn   = segs.back();
+    const std::string& head = segs[segs.size() - 2];
+    if (realm_names_.count(head)) return;                       // Realm::fn
+
+    auto tp = fn_type_params_.find(head);
+    if (tp != fn_type_params_.end()) {
+        bool found = false;
+        size_t start = 0;
+        const std::string& b = tp->second;
+        while (!b.empty() && start <= b.size()) {
+            size_t plus = b.find('+', start);
+            std::string one = b.substr(start, plus == std::string::npos ? std::string::npos : plus - start);
+            auto nit = nexus_nodes_.find(one);
+            if (nit != nexus_nodes_.end())
+                for (auto& m : nit->second->children)
+                    if (m && m->kind == NodeKind::PulseDecl && m->value == fn) found = true;
+            if (plus == std::string::npos) break;
+            start = plus + 1;
+        }
+        if (!found) {
+            error("XP2019", callee.span,
+                  "type parameter `" + head + "` has no associated function `" + fn + "` in its bounds",
+                  (uint32_t)callee.value.size(),
+                  tp->second.empty()
+                      ? "`" + head + "` has no bound; add one whose nexus declares `pulse " + fn + "(...)`, "
+                        "e.g. `<" + head + ": SomeNexus>`"
+                      : "none of `" + tp->second + "` declares `pulse " + fn + "(...)`");
+        }
+        return;
+    }
+    bool primitive = head == "int" || head == "float" || head == "bool" || head == "str";
+    if (forge_names_.count(head) || primitive) {
+        auto it = assoc_fns_.find(head);
+        if (it == assoc_fns_.end() || !it->second.count(fn)) {
+            error("XP2019", callee.span,
+                  "no associated function `" + fn + "` found for type `" + head + "`",
+                  (uint32_t)callee.value.size(),
+                  "declare it in an `impl " + head + " { pulse " + fn + "(...) -> ... }` block "
+                  "(a member without `self`)");
+        }
+    }
+}
+
 void SemanticAnalyzer::check_call(const ASTNodePtr& n) {
+    check_assoc_path_call(n);
     if (n->children.empty()) return;
     auto& callee = n->children[0];
 
@@ -893,12 +1560,14 @@ void SemanticAnalyzer::check_call(const ASTNodePtr& n) {
                 if (it == inferred.end()) {
                     inferred[ptype] = arg_type;
                     first_use_span[ptype] = n->children[i + 1]->span;
-                    if (!bound.empty() && !satisfies_bound(arg_type, bound)) {
+                    std::string unmet = bound.empty() ? std::string()
+                                                      : first_unsatisfied_bound(arg_type, bound);
+                    if (!unmet.empty()) {
                         error("XP2012", n->children[i + 1]->span,
-                              "type `" + arg_type + "` does not satisfy bound `" + bound +
+                              "type `" + arg_type + "` does not satisfy bound `" + unmet +
                               "` required by type parameter `" + ptype + "`",
                               1,
-                              "`" + bound + "` requires an `impl " + bound + " for " +
+                              "`" + unmet + "` requires an `impl " + unmet + " for " +
                               arg_type + "` (or, for Numeric, int/float)");
                     }
                 } else if (it->second != arg_type) {

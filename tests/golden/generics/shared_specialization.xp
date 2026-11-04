@@ -1,0 +1,15 @@
+forge Box<T> {
+    value: T
+}
+
+pulse unbox<T>(b: Box<T>) -> T {
+    return b.value
+}
+
+pulse main() {
+    atom a: Box<int> = spawn Box<int> { value: 1 }
+    atom b: Box<int> = spawn Box<int> { value: 2 }
+    atom x = unbox(a)
+    atom y = unbox(b)
+    beam f"x={x} y={y}"
+}

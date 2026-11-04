@@ -186,25 +186,69 @@ Token Lexer::lex_string() {
 }
 
 // ── Number literal ───────────────────────────────────────────
+// Forms: 42  1_000  0xFF  0b1010  3.14  1e-9, each optionally followed by an
+// explicit type suffix: i8 i16 i32 i64 isize u8 u16 u32 u64 usize f32 f64
+// (`255u8`, `1_000i64`, `1.5f32`). Hex and binary integers are normalised to
+// decimal text here so no later stage needs to know the radix. The legacy
+// single-letter `f` float suffix is kept.
+static bool lex_suffix_at(const std::string& src, size_t pos, std::string& out) {
+    static const char* kSuffixes[] = {"isize", "usize", "i16", "i32", "i64", "u16", "u32", "u64",
+                                       "f32", "f64", "i8", "u8"};
+    for (const char* sfx : kSuffixes) {
+        size_t n = std::string(sfx).size();
+        if (src.compare(pos, n, sfx) != 0) continue;
+        size_t after = pos + n;
+        if (after < src.size() && (isalnum((unsigned char)src[after]) || src[after] == '_')) continue;
+        out = sfx;
+        return true;
+    }
+    return false;
+}
+
 Token Lexer::lex_number() {
     uint32_t ln = line_, cl = col_;
     std::string num;
     bool is_float = false;
+    std::string suffix;
 
-    // Hex: 0x...
-    if (peek() == '0' && (peek(1) == 'x' || peek(1) == 'X')) {
-        num += advance(); num += advance();
-        while (pos_ < src_.size() && isxdigit(peek())) num += advance();
-        Token t; t.type = NUMBER_INT; t.value = num; t.line = ln; t.col = cl;
-        return t;
+    // Hex / binary: normalised to decimal text (unsigned 64-bit; a literal
+    // that needs more than 64 bits is left as written and rejected later).
+    if (peek() == '0' && (peek(1) == 'x' || peek(1) == 'X' || peek(1) == 'b' || peek(1) == 'B')) {
+        bool hex = (peek(1) == 'x' || peek(1) == 'X');
+        size_t save = pos_;
+        uint32_t save_col = col_;
+        advance(); advance();
+        std::string digits;
+        while (pos_ < src_.size() &&
+               ((hex ? isxdigit((unsigned char)peek()) : (peek() == '0' || peek() == '1')) || peek() == '_')) {
+            char c = advance();
+            if (c != '_') digits += c;
+        }
+        if (!digits.empty()) {
+            unsigned long long v = 0; bool overflow = false;
+            for (char c : digits) {
+                int d = isdigit((unsigned char)c) ? c - '0' : (tolower(c) - 'a' + 10);
+                if (v > (~0ULL - d) / (hex ? 16 : 2)) { overflow = true; break; }
+                v = v * (hex ? 16 : 2) + d;
+            }
+            Token t; t.type = NUMBER_INT; t.line = ln; t.col = cl;
+            t.value = overflow ? std::string(src_, save, pos_ - save) : std::to_string(v);
+            lex_suffix_at(src_, pos_, suffix);
+            if (!suffix.empty()) { pos_ += suffix.size(); col_ += (uint32_t)suffix.size(); }
+            t.suffix = suffix;
+            return t;
+        }
+        pos_ = save; col_ = save_col;   // "0b"/"0x" with no digits: the plain number 0
     }
 
-    while (pos_ < src_.size() && (isdigit(peek()) || peek() == '.')) {
+    while (pos_ < src_.size() && (isdigit(peek()) || peek() == '.' ||
+                                  (peek() == '_' && isdigit(peek(1)) && !num.empty()))) {
         if (peek() == '.') {
             if (!isdigit(peek(1))) break; // .. range operator
             is_float = true;
         }
-        num += advance();
+        char c = advance();
+        if (c != '_') num += c;
     }
     // Scientific notation exponent: e/E, optional sign, digits.
     // Must actually be followed by digits (optionally after a sign)
@@ -222,15 +266,22 @@ Token Lexer::lex_number() {
             while (pos_ < src_.size() && isdigit(peek())) num += advance();
         }
     }
-    // Optional suffix: f for float
-    if (pos_ < src_.size() && (peek() == 'f' || peek() == 'F')) {
+    // Explicit type suffix (`42u8`, `1.5f32`); a float suffix makes the
+    // literal a float even when written without a decimal point (`1f32`).
+    if (lex_suffix_at(src_, pos_, suffix)) {
+        pos_ += suffix.size();
+        col_ += (uint32_t)suffix.size();
+        if (suffix[0] == 'f') is_float = true;
+    } else if (pos_ < src_.size() && (peek() == 'f' || peek() == 'F')) {
+        // legacy: a bare trailing `f` marks a float literal
         num += advance(); is_float = true;
     }
     Token t;
-    t.type  = is_float ? NUMBER_FLOAT : NUMBER_INT;
-    t.value = num;
-    t.line  = ln;
-    t.col   = cl;
+    t.type   = is_float ? NUMBER_FLOAT : NUMBER_INT;
+    t.value  = num;
+    t.suffix = suffix;
+    t.line   = ln;
+    t.col    = cl;
     return t;
 }
 
@@ -303,6 +354,7 @@ std::vector<Token> Lexer::tokenize() {
             advance();
             if (peek() == '>') { advance(); toks.push_back(make(PIPE_GT, "|>")); }
             else if (peek() == '|') { advance(); toks.push_back(make(AND_AND, "||")); }
+            else if (peek() == '=') { advance(); toks.push_back(make(PIPE_EQ, "|=")); }
             else { toks.push_back(make(PIPE, "|")); }
             continue;
         }
@@ -332,7 +384,11 @@ std::vector<Token> Lexer::tokenize() {
                 else               toks.push_back(make(SLASH,   "/"));
                 break;
             }
-            case '%': toks.push_back(make(PERCENT, "%")); break;
+            case '%': {
+                if (peek() == '=') { advance(); toks.push_back(make(PERCENT_EQ, "%=")); }
+                else               toks.push_back(make(PERCENT, "%"));
+                break;
+            }
             case '=': {
                 if (peek() == '=') { advance(); toks.push_back(make(EQ_EQ, "==")); }
                 else if (peek() == '>') { advance(); toks.push_back(make(FAT_ARROW, "=>")); }
@@ -346,22 +402,35 @@ std::vector<Token> Lexer::tokenize() {
             }
             case '<': {
                 if (peek() == '=') { advance(); toks.push_back(make(LT_EQ,   "<=")); }
-                else if (peek() == '<') { advance(); toks.push_back(make(LSHIFT, "<<")); }
+                else if (peek() == '<') {
+                    advance();
+                    if (peek() == '=') { advance(); toks.push_back(make(LSHIFT_EQ, "<<=")); }
+                    else               toks.push_back(make(LSHIFT, "<<"));
+                }
                 else               toks.push_back(make(LT,     "<"));
                 break;
             }
             case '>': {
                 if (peek() == '=') { advance(); toks.push_back(make(GT_EQ,   ">=")); }
-                else if (peek() == '>') { advance(); toks.push_back(make(RSHIFT, ">>")); }
+                else if (peek() == '>') {
+                    advance();
+                    if (peek() == '=') { advance(); toks.push_back(make(RSHIFT_EQ, ">>=")); }
+                    else               toks.push_back(make(RSHIFT, ">>"));
+                }
                 else               toks.push_back(make(GT,     ">"));
                 break;
             }
             case '&': {
                 if (peek() == '&') { advance(); toks.push_back(make(AND_AND, "&&")); }
+                else if (peek() == '=') { advance(); toks.push_back(make(AMP_EQ, "&=")); }
                 else               toks.push_back(make(AMPERSAND, "&"));
                 break;
             }
-            case '^': toks.push_back(make(CARET,  "^")); break;
+            case '^': {
+                if (peek() == '=') { advance(); toks.push_back(make(CARET_EQ, "^=")); }
+                else               toks.push_back(make(CARET,  "^"));
+                break;
+            }
             case '.': {
                 if (peek() == '.') { advance(); toks.push_back(make(DOT_DOT, "..")); }
                 else               toks.push_back(make(DOT, "."));

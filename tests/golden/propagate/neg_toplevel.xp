@@ -1,0 +1,3 @@
+enum Result<T, E> { Ok(T)  Err(E) }
+pulse parse(s: str) -> Result<int, str> { return Result.Ok(1) }
+atom x = parse("1")?

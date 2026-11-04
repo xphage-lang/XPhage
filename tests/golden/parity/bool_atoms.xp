@@ -1,0 +1,10 @@
+pulse is_big(n: int) -> bool { return n > 5 }
+pulse main() {
+    atom lit = true
+    atom cmp = 3 > 2
+    atom lg = true && false
+    atom neg = !true
+    atom call = is_big(9)
+    atom ann: bool = 2 > 1
+    beam f"lit={lit} cmp={cmp} lg={lg} neg={neg} call={call} ann={ann}"
+}

@@ -52,6 +52,22 @@ enum class IROpcode {
     // from GEP (field access) and Alloca (fresh storage) — this
     // operates on an already-existing value register.
     AddrOf,
+    // Takes the address of a field directly — operands[0] is the
+    // object (or object-pointer) register, extra is the field name —
+    // WITHOUT first materializing the field's value into a separate
+    // copy register the way GEP+AddrOf composed together would. Only
+    // used when a method call's receiver is itself a field access
+    // (e.g. `h.c.increment()` — need &h.c, not &(a copy of h.c)):
+    // GEP's own value-copy semantics are correct and required for an
+    // ordinary field *read*, but wrong when the result is fed
+    // straight into a mutating method call, since AddrOf-of-a-GEP-
+    // result would take the address of the copy instead of the real
+    // field (confirmed by testing: a real impl method mutating
+    // `self.n` through a struct-field receiver silently mutated a
+    // throwaway copy and left the original field unchanged). See
+    // ir_lower.cpp's CallExpr lowering (the MemberExpr-receiver case)
+    // and transpiler.cpp's emission for the two ends of this.
+    GEPAddr,
     // Conversions
     Trunc, ZExt, SExt, FPToI, IToFP, Bitcast,
     // X-Phage-specific
@@ -89,6 +105,13 @@ struct IRInstr {
     std::vector<std::string> operands;
     std::string extra;      // string payload, label, etc.
     uint32_t    line = 0;
+    // Sized numeric types (see compiler/xphage_sema/include/numeric_types.hpp).
+    // `ty`: the sized type an arithmetic/bitwise/shift/unary instruction computes
+    // in (its result wraps at that width), or the TARGET of a `$cast` call.
+    // `from_ty`: the SOURCE type of a `$cast`. Empty for ordinary instructions.
+    // A typed literal operand is written `<digits>@<type>` (e.g. `255@u8`).
+    std::string ty;
+    std::string from_ty;
 };
 
 struct IRBlock {

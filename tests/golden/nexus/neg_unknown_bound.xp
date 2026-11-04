@@ -1,0 +1,2 @@
+pulse f<T: Nope>(a: T) -> int { return 1 }
+pulse main() { beam 1 }

@@ -1,0 +1,6 @@
+enum Result<T, E> { Ok(T)  Err(E) }
+pulse parse(s: str) -> Result<int, str> { return Result.Ok(1) }
+pulse total() -> int {
+    atom x = parse("1")?
+    return x
+}

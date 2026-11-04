@@ -1,0 +1,15 @@
+pulse fill(v: Vec<int>) {
+    v.push(1)
+    v.push(2)
+}
+
+pulse total(v: Vec<int>) -> int {
+    return v.size()
+}
+
+pulse main() {
+    atom xs: Vec<int> = spawn Vec<int> { }
+    fill(xs)
+    atom n = total(xs)
+    beam f"n={n}"
+}

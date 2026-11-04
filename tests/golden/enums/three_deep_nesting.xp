@@ -1,0 +1,34 @@
+enum Option<T> { Some(T)  None }
+enum Result<T, E> { Ok(T)  Err(E) }
+
+pulse mk(k: int) -> Result<Option<Option<int>>, str> {
+    if k < 0 { return Result.Err("neg") }
+    if k == 0 { return Result.Ok(Option.None) }
+    if k == 1 { return Result.Ok(Option.Some(Option.None)) }
+    return Result.Ok(Option.Some(Option.Some(k * 100)))
+}
+
+pulse show(k: int) {
+    atom r = mk(k)
+    probe r {
+        diverge Result.Ok(o1) -> {
+            probe o1 {
+                diverge Option.Some(o2) -> {
+                    probe o2 {
+                        diverge Option.Some(v) -> { beam f"k={k} deep={v}" }
+                        diverge Option.None -> { beam f"k={k} inner-none" }
+                    }
+                }
+                diverge Option.None -> { beam f"k={k} outer-none" }
+            }
+        }
+        diverge Result.Err(e) -> { beam f"k={k} err={e}" }
+    }
+}
+
+pulse main() {
+    show(-1)
+    show(0)
+    show(1)
+    show(7)
+}

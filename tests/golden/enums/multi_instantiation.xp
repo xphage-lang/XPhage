@@ -1,0 +1,39 @@
+enum Option<T> {
+    Some(T)
+    None
+}
+enum Result<T, E> {
+    Ok(T)
+    Err(E)
+}
+
+pulse first_int(flag: bool) -> Option<int> {
+    if flag { return Option.Some(7) }
+    return Option.None
+}
+pulse first_name(flag: bool) -> Option<str> {
+    if flag { return Option.Some("ann") }
+    return Option.None
+}
+pulse parse(s: str) -> Result<int, str> {
+    if s == "1" { return Result.Ok(1) }
+    return Result.Err("bad")
+}
+
+pulse main() {
+    atom a = first_int(true)
+    probe a {
+        diverge Option.Some(v) -> { beam f"int={v}" }
+        diverge Option.None -> { beam f"none" }
+    }
+    atom b = first_name(true)
+    probe b {
+        diverge Option.Some(v) -> { beam f"str={v}" }
+        diverge Option.None -> { beam f"none" }
+    }
+    atom c = parse("x")
+    probe c {
+        diverge Result.Ok(v) -> { beam f"ok={v}" }
+        diverge Result.Err(e) -> { beam f"err={e}" }
+    }
+}

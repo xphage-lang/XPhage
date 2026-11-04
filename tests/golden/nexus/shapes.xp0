@@ -1,0 +1,4 @@
+pulse main() {
+    atom r = spawn Rect { w: 3.0, h: 4.0 }
+    beam r.describe()
+}

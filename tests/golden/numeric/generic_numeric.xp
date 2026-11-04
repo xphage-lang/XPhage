@@ -1,0 +1,10 @@
+pulse sum2<T: Numeric>(a: T, b: T) -> T { return a + b }
+pulse twice<T: Numeric>(a: T) -> T { return a + a }
+pulse main() {
+    beam sum2(200u8, 100u8)
+    beam sum2(1.5f32, 2.25f32)
+    beam sum2(3, 4)
+    beam sum2(2.5, 1.0)
+    beam twice(127i8)
+    beam twice(4000000000u32)
+}

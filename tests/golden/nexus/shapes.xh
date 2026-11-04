@@ -1,0 +1,10 @@
+nexus Shape {
+    area() -> float
+    label() -> str
+    describe() -> str { return f"{self.label()}: {self.area()}" }
+}
+forge Rect { w: float = 0.0  h: float = 0.0 }
+impl Shape for Rect {
+    area() -> float { return self.w * self.h }
+    label() -> str { return "rect" }
+}

@@ -1,0 +1,36 @@
+enum Result<T, E> { Ok(T)  Err(E) }
+
+pulse half(n: int) -> Result<int, str> {
+    if n % 2 == 1 { return Result.Err(f"{n} is odd") }
+    return Result.Ok(n / 2)
+}
+
+pulse sum_halves(limit: int) -> Result<int, str> {
+    shadow total: int = 0
+    for i in 0..limit {
+        total = total + half(i * 2)?
+        beam f"i={i} total={total}"
+    }
+    return Result.Ok(total)
+}
+
+pulse sum_bad(limit: int) -> Result<int, str> {
+    shadow total: int = 0
+    for i in 0..limit {
+        total = total + half(i + 1)?
+        beam f"i={i} total={total}"
+    }
+    return Result.Ok(total)
+}
+
+pulse show(r: Result<int, str>) {
+    probe r {
+        diverge Result.Ok(v) -> { beam f"=> ok {v}" }
+        diverge Result.Err(e) -> { beam f"=> err {e}" }
+    }
+}
+
+pulse main() {
+    show(sum_halves(3))
+    show(sum_bad(5))
+}

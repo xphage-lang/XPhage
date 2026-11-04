@@ -1,0 +1,25 @@
+// A nexus with associated functions: `T::default()` inside a generic body, resolved per type.
+nexus Default { pulse default() -> Self }
+nexus Shape {
+    pulse sides() -> int
+    pulse is_polygon() -> bool { return Self::sides() > 2 }
+    name() -> str
+}
+forge Counter { n: int = 0 }
+forge Tri { id: int = 0 }
+forge Line { id: int = 0 }
+impl Default for Counter { pulse default() -> Self { return spawn Self { n: 100 } } }
+impl Default for Tri     { pulse default() -> Self { return spawn Self { id: 3 } } }
+impl Shape for Tri  { pulse sides() -> int { return 3 }  name() -> str { return "tri" } }
+impl Shape for Line { pulse sides() -> int { return 2 }  name() -> str { return "line" } }
+pulse fresh<T: Default>(seed: T) -> T { return T::default() }
+pulse make<T: Default>() -> T { return T::default() }
+pulse main() {
+    atom c = spawn Counter { n: 1 }
+    atom d = fresh(c)
+    beam d.n
+    atom t = make<Tri>()
+    beam t.id
+    beam Tri::is_polygon()
+    beam Line::is_polygon()
+}

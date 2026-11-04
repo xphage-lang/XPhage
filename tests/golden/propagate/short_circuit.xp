@@ -1,0 +1,25 @@
+enum Result<T, E> { Ok(T)  Err(E) }
+
+pulse parse(s: str) -> Result<int, str> {
+    beam f"parse {s}"
+    if s == "5" { return Result.Ok(5) }
+    return Result.Err(f"bad {s}")
+}
+
+pulse check(flag: bool, s: str) -> Result<bool, str> {
+    if flag && parse(s)? > 0 { return Result.Ok(true) }
+    return Result.Ok(false)
+}
+
+pulse show(r: Result<bool, str>) {
+    probe r {
+        diverge Result.Ok(v) -> { beam f"=> ok {v}" }
+        diverge Result.Err(e) -> { beam f"=> err {e}" }
+    }
+}
+
+pulse main() {
+    show(check(false, "x"))
+    show(check(true, "5"))
+    show(check(true, "x"))
+}

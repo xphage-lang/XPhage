@@ -1,0 +1,24 @@
+enum Result<T, E> {
+    Ok(T)
+    Err(E)
+}
+
+pulse divide(a: int, b: int) -> Result<int, str> {
+    if b == 0 {
+        return Result.Err("div by zero")
+    }
+    return Result.Ok(a / b)
+}
+
+pulse main() {
+    atom r = divide(10, 2)
+    probe r {
+        diverge Result.Ok(v) -> { beam f"ok={v}" }
+        diverge Result.Err(e) -> { beam f"err={e}" }
+    }
+    atom s = divide(1, 0)
+    probe s {
+        diverge Result.Ok(v) -> { beam f"ok={v}" }
+        diverge Result.Err(e) -> { beam f"err={e}" }
+    }
+}

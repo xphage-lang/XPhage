@@ -1,0 +1,4 @@
+nexus A { f() -> int }
+forge D { n: int = 0 }
+impl A for D { f() -> str { return "x" } }
+pulse main() { beam 1 }

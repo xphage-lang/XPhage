@@ -1,0 +1,22 @@
+enum Option<T> {
+    Some(T)
+    None
+}
+
+pulse make(flag: bool) -> Option<Vec<int>> {
+    if flag {
+        atom v: Vec<int> = spawn Vec<int> { }
+        v.push(1)
+        v.push(2)
+        return Option.Some(v)
+    }
+    return Option.None
+}
+
+pulse main() {
+    atom r = make(true)
+    probe r {
+        diverge Option.Some(v) -> { beam f"len={v.len()}" }
+        diverge Option.None -> { beam f"none" }
+    }
+}

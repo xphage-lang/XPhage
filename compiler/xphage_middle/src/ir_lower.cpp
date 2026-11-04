@@ -4,6 +4,7 @@
 // AeonCoreX Lab
 // ============================================================
 #include "../include/ir_lower.hpp"
+#include <xphage/enum_shape.hpp>
 #include "../../xphage_lexer/include/lexer.hpp"
 #include "../../xphage_parse/include/parser.hpp"
 #include <sstream>
@@ -74,6 +75,32 @@ public:
     // all before this fix.
     std::unordered_set<std::string> known_methods;
 
+    // Every declared forge's field types, keyed "Type::field" ->
+    // declared field type string (the raw AST `field->extra`, already
+    // post-monomorphize by the time lowering runs — so a Vec<int>
+    // field is "Vec<int>", bracket-structured, matching var_types'
+    // own convention). Populated by the same kind of pre-pass as
+    // known_enums/known_methods (see collect_struct_fields in
+    // lower_to_ir), so field types are resolvable regardless of
+    // whether the `forge Type { ... }` declaration appears before or
+    // after the code that accesses one of its fields. Needed to
+    // resolve a MemberExpr receiver's type recursively — e.g.
+    // `b.items.push(x)`: `b`'s type comes from var_types, then
+    // `known_struct_fields["Bag::items"]` gives "Vec<int>" — see
+    // resolve_receiver_type below, which is what both the Vec/Map/Set
+    // dispatch and (previously-unreachable-through-a-field) real
+    // impl-method calls now go through for a MemberExpr receiver.
+    std::unordered_map<std::string, std::string> known_struct_fields;
+    // Declared field order per forge, and the default-value expression of
+    // each field that has one ("Type::field" -> the AST node of `= expr`).
+    // A `spawn Type { ... }` that omits a field must initialize it from
+    // its declared default (language book: forge fields carry defaults);
+    // before this, every omitted field was left value-initialized, so a
+    // default like `prefix: str = "> "` silently came out empty on XIL
+    // (the golden suite only ever used defaults equal to the zero value).
+    std::unordered_map<std::string, std::vector<std::string>> known_struct_field_order;
+    std::unordered_map<std::string, const ASTNode*>           known_struct_defaults;
+
     // Best-effort local variable type tracking: name -> declared/
     // inferred type name, populated as Alloca-backed declarations are
     // lowered (see the AtomDecl/ShadowDecl/pulse-parameter lowering
@@ -85,6 +112,17 @@ public:
     // limitation — a variable shadowed in a nested block with a
     // different type isn't modeled correctly).
     std::unordered_map<std::string, std::string> var_types;
+
+    // Every top-level pulse's declared return type string, keyed by name.
+    // `?` needs it in two places: the ENCLOSING pulse's return type (what a
+    // propagated failure is rebuilt as) and, for `f()?`, the CALLEE's return
+    // type (which enum the operand is, so its tag can be tested). Filled by
+    // a pre-pass so it does not depend on declaration order.
+    std::unordered_map<std::string, std::string> fn_ret_types;
+    // "Type::method" -> declared return type, so `atom c = obj.method(x)` can
+    // track c's type exactly like `atom c = f(x)` does via fn_ret_types.
+    std::unordered_map<std::string, std::string> method_ret_types;
+    int propagate_counter = 0;   // unique names for `?`'s payload bindings
 
     explicit IRBuilder(const std::string& name) {
         mod.name = name;
@@ -139,6 +177,45 @@ public:
 
 static std::string lower_expr(const ASTNode& n, IRBuilder& b);
 
+// Best-effort resolution of an arbitrary expression node's XPhage-
+// level type string (e.g. "Vec<int>", "Counter", "Bag") — used to
+// resolve a CallExpr's receiver type for method dispatch (both the
+// Vec/Map/Set builtin-collection case and the real impl-method case),
+// without needing to actually lower the expression first. Handles:
+//   - Identifier: looks up b.var_types (a local/parameter).
+//   - SpawnExpr: its own .value IS the type (e.g. `spawn Vec<int>
+//     {}`.value == "Vec<int>").
+//   - MemberExpr (obj.field): resolves obj's type recursively, then
+//     looks up "ObjType::field" in b.known_struct_fields. This is
+//     what makes a chain like `b.items.push(x)` resolvable: `b`'s
+//     type comes from var_types (Identifier case), then
+//     known_struct_fields["Bag::items"] gives "Vec<int>".
+// Returns "" when the type can't be determined (e.g. the receiver is
+// itself a call result, or an unrecognized field) — callers must
+// treat that as "unknown, fall through to generic handling" rather
+// than guessing.
+static std::string resolve_expr_type(const ASTNode& n, IRBuilder& b) {
+    if (n.kind == NodeKind::Identifier) {
+        auto vit = b.var_types.find(n.value);
+        return vit != b.var_types.end() ? vit->second : std::string();
+    }
+    if (n.kind == NodeKind::SpawnExpr) {
+        return n.value;
+    }
+    if (n.kind == NodeKind::MemberExpr && !n.children.empty() && n.children[0]) {
+        std::string obj_type = resolve_expr_type(*n.children[0], b);
+        if (obj_type.empty()) return "";
+        // obj_type may itself be a builtin collection or generic
+        // instantiation (e.g. "Vec<int>") — field lookup only makes
+        // sense for a plain struct type name, so bail rather than
+        // building a bogus "Vec<int>::field" lookup key.
+        if (obj_type.find('<') != std::string::npos) return "";
+        auto fit = b.known_struct_fields.find(obj_type + "::" + n.value);
+        return fit != b.known_struct_fields.end() ? fit->second : std::string();
+    }
+    return "";
+}
+
 // Parse and lower a single f-string interpolation segment's raw
 // source text (the content between `{` and `}`, already extracted
 // from the surrounding literal text by lower_fstring below) into an
@@ -169,7 +246,9 @@ static std::string lower_fstring_expr(const std::string& raw_expr, IRBuilder& b)
 // terminate the segment early) and lower it to a single IR string
 // value by chaining literal segments and lowered sub-expressions with
 // string-concatenation Add instructions.
-static std::string lower_fstring(const std::string& raw, IRBuilder& b, int line) {
+static std::string lower_fstring(const std::string& raw, IRBuilder& b, int line,
+                                 const std::vector<ASTNodePtr>* parts = nullptr) {
+    size_t part_k = 0;
     std::string result;      // accumulated as we go: either empty (nothing emitted
                               // yet) or a "%regN"-style IR value reference
     bool have_result = false;
@@ -195,7 +274,11 @@ static std::string lower_fstring(const std::string& raw, IRBuilder& b, int line)
         cur.clear();
     };
     auto flush_expr = [&](const std::string& expr_src) {
-        std::string val = lower_fstring_expr(expr_src, b);
+        // pre-parsed interpolation (parser's attach_fstring_parts) when present
+        std::string val = (parts && part_k < parts->size() && (*parts)[part_k])
+                              ? lower_expr(*(*parts)[part_k], b)
+                              : lower_fstring_expr(expr_src, b);
+        part_k++;
         // Route the interpolated value through xp_to_string so
         // numeric/bool/struct values concatenate correctly instead of
         // relying on operator+ overload resolution across mismatched
@@ -247,7 +330,11 @@ static std::string lower_fstring(const std::string& raw, IRBuilder& b, int line)
 static std::string lower_expr(const ASTNode& n, IRBuilder& b) {
     switch (n.kind) {
         case NodeKind::IntLit:
-        case NodeKind::FloatLit:
+        case NodeKind::FloatLit: {
+            // typed (sized) literal: `<value>@<type>`, rendered by the emitter
+            auto t = n.attrs.find("ty");
+            return t != n.attrs.end() ? n.value + "@" + t->second : n.value;
+        }
         case NodeKind::BoolLit:
             return n.value;
         case NodeKind::StringLit:
@@ -278,7 +365,7 @@ static std::string lower_expr(const ASTNode& n, IRBuilder& b) {
             // *verbatim* into the generated C++ as
             // `xp_fstring_format(calc={result})`, which isn't even
             // syntactically valid C++, let alone functionally correct.
-            return lower_fstring(n.value, b, n.span.line);
+            return lower_fstring(n.value, b, n.span.line, &n.children);
         }
         case NodeKind::NullLit:
             return "null";
@@ -293,6 +380,77 @@ static std::string lower_expr(const ASTNode& n, IRBuilder& b) {
             if (uit != b.use_aliases.end()) return "%" + uit->second;
             return "%" + n.value;
         }
+        case NodeKind::PropagateExpr: {
+            // `expr?` — unwrap the success value, or RETURN the failure from
+            // the enclosing pulse at once. Built entirely from existing
+            // pieces: EnumMatch (tag test + payload binding), BrCond, Spawn
+            // (variant construction) and Ret.
+            //
+            //     %subj = <operand>
+            //     %c    = EnumMatch %subj, <errbind>, Op.Err      ; failure?
+            //     BrCond %c -> q_fail, q_ok
+            //   q_fail:  %e = Spawn Ret::Err(%errbind) ; Ret %e
+            //   q_ok:    EnumMatch %subj, <valbind>, Op.Ok        ; bind payload
+            //            (value of the whole expression is %valbind)
+            //
+            // The failure is rebuilt in the FUNCTION's return type, so the
+            // error payload is carried through unchanged.
+            if (n.children.empty() || !n.children[0]) return "%err";
+            std::string subj = lower_expr(*n.children[0], b);
+
+            // enum type of the enclosing pulse's return value
+            std::string fn_enum;
+            if (b.cur_fn) {
+                auto fr = b.fn_ret_types.find(b.cur_fn->name);
+                fn_enum = fr != b.fn_ret_types.end() ? fr->second : b.cur_fn->ret_type_name;
+            }
+            auto fe = b.known_enums.find(fn_enum);
+            if (fe == b.known_enums.end() || enum_try_kind(*fe->second) == 0) {
+                throw std::runtime_error("`?` used in a pulse whose return type `" + fn_enum +
+                                         "` is not a Result-like or Option-like enum");
+            }
+            const int kind = enum_try_kind(*fe->second);
+
+            // enum type of the OPERAND: a call to a known pulse, or a
+            // variable whose type was tracked; otherwise assume it is the
+            // same enum as the function returns (a C++ compile error, not a
+            // silent miscompile, when that guess is wrong).
+            std::string op_enum;
+            const ASTNode& operand = *n.children[0];
+            if (operand.kind == NodeKind::CallExpr && !operand.children.empty() && operand.children[0] &&
+                operand.children[0]->kind == NodeKind::Identifier) {
+                auto cr = b.fn_ret_types.find(operand.children[0]->value);
+                if (cr != b.fn_ret_types.end()) op_enum = cr->second;
+            } else if (operand.kind == NodeKind::Identifier) {
+                auto vt = b.var_types.find(operand.value);
+                if (vt != b.var_types.end()) op_enum = vt->second;
+            }
+            if (!b.known_enums.count(op_enum)) op_enum = fn_enum;
+
+            const std::string fail_variant = kind == 1 ? "Err" : "None";
+            const std::string succ_variant = kind == 1 ? "Ok"  : "Some";
+            const std::string uid          = std::to_string(b.propagate_counter++);
+            const std::string errbind      = kind == 1 ? "_q_err" + uid : "";
+            const std::string valbind      = "_q_val" + uid;
+
+            std::string lbl_fail = b.new_lbl("q_fail");
+            std::string lbl_ok   = b.new_lbl("q_ok");
+            std::string cond = b.new_reg();
+            b.emit(IROpcode::EnumMatch, cond, {subj, errbind}, op_enum + "." + fail_variant, n.span.line);
+            b.emit(IROpcode::BrCond, "", {cond, lbl_fail, lbl_ok}, "", n.span.line);
+
+            b.cur_blk = &b.cur_fn->new_block(lbl_fail);
+            std::string fail_val = b.new_reg();
+            if (kind == 1) b.emit(IROpcode::Spawn, fail_val, {"%" + errbind}, fn_enum + "::" + fail_variant, n.span.line);
+            else           b.emit(IROpcode::Spawn, fail_val, {},              fn_enum + "::" + fail_variant, n.span.line);
+            b.emit(IROpcode::Ret, "", {fail_val}, "", n.span.line);
+
+            b.cur_blk = &b.cur_fn->new_block(lbl_ok);
+            std::string ok_cond = b.new_reg();
+            b.emit(IROpcode::EnumMatch, ok_cond, {subj, valbind}, op_enum + "." + succ_variant, n.span.line);
+            return "%" + valbind;
+        }
+
         case NodeKind::PathExpr:
             // Realm::path (e.g. "Geometry::length_sq", "App::rank")
             // was previously unhandled here entirely — any qualified
@@ -307,6 +465,35 @@ static std::string lower_expr(const ASTNode& n, IRBuilder& b) {
 
         case NodeKind::BinaryOp: {
             if (n.children.size() < 2) return "%err";
+            // `a && b` / `a || b` short-circuit: the right operand is lowered
+            // into its OWN block, reached only when the left one does not
+            // already decide the result. IR registers are hoisted mutable
+            // locals here (see the EnumMatch emission), so the result
+            // register is assigned from the left operand first and then
+            // overwritten from the right operand inside that block.
+            // Previously both operands were lowered up front and combined
+            // with a single And/Or, so `flag && risky()` ran risky() — and
+            // any `?` inside it returned early — even when flag was false.
+            {
+                const std::string& lop = n.value;
+                const bool is_and = (lop == "&&" || lop == "and");
+                const bool is_or  = (lop == "||" || lop == "or");
+                if ((is_and || is_or) && b.cur_fn) {
+                    std::string Lv = lower_expr(*n.children[0], b);
+                    std::string res = b.new_reg();
+                    b.emit(IROpcode::And, res, {Lv, "true"}, "&&", n.span.line);   // res = Lv (as bool)
+                    std::string lbl_rhs = b.new_lbl(is_and ? "and_rhs" : "or_rhs");
+                    std::string lbl_end = b.new_lbl(is_and ? "and_end" : "or_end");
+                    if (is_and) b.emit(IROpcode::BrCond, "", {res, lbl_rhs, lbl_end}, "", n.span.line);
+                    else        b.emit(IROpcode::BrCond, "", {res, lbl_end, lbl_rhs}, "", n.span.line);
+                    b.cur_blk = &b.cur_fn->new_block(lbl_rhs);
+                    std::string Rv = lower_expr(*n.children[1], b);
+                    b.emit(IROpcode::And, res, {Rv, "true"}, "&&", n.span.line);   // res = Rv (as bool)
+                    b.emit(IROpcode::Br, "", {lbl_end});
+                    b.cur_blk = &b.cur_fn->new_block(lbl_end);
+                    return res;
+                }
+            }
             std::string L = lower_expr(*n.children[0], b);
             std::string R = lower_expr(*n.children[1], b);
             std::string r = b.new_reg();
@@ -326,6 +513,13 @@ static std::string lower_expr(const ASTNode& n, IRBuilder& b) {
             else if (opv == "&&" || opv == "and") op = IROpcode::And;
             else if (opv == "||" || opv == "or")  op = IROpcode::Or;
             b.emit(op, r, {L, R}, opv, n.span.line);
+            {
+                // sized operands: the instruction computes (and wraps) in that type
+                auto ot = n.attrs.find("opty");
+                if (ot != n.attrs.end() && (op == IROpcode::Add || op == IROpcode::Sub || op == IROpcode::Mul ||
+                                            op == IROpcode::Div || op == IROpcode::Mod))
+                    b.cur_blk->instrs.back().ty = ot->second;
+            }
             return r;
         }
 
@@ -356,6 +550,11 @@ static std::string lower_expr(const ASTNode& n, IRBuilder& b) {
                 b.emit(IROpcode::Not, r, {V}, "bitwise", n.span.line);
             } else {
                 b.emit(IROpcode::Not, r, {V}, n.value, n.span.line);
+            }
+            {
+                auto t = n.attrs.find("ty");
+                if (t != n.attrs.end() && (n.value == "-" || n.value == "~"))
+                    b.cur_blk->instrs.back().ty = t->second;
             }
             return r;
         }
@@ -414,24 +613,116 @@ static std::string lower_expr(const ASTNode& n, IRBuilder& b) {
                 !n.children[0]->children.empty()) {
                 auto& obj_node = n.children[0]->children[0];
                 std::string method_name = n.children[0]->value;
-                std::string obj_type;
-                if (obj_node->kind == NodeKind::Identifier) {
-                    auto vit = b.var_types.find(obj_node->value);
-                    if (vit != b.var_types.end()) obj_type = vit->second;
-                } else if (obj_node->kind == NodeKind::SpawnExpr) {
-                    obj_type = obj_node->value;
-                }
+                // resolve_expr_type recurses through MemberExpr chains
+                // (obj.field.method()), not just a bare Identifier or
+                // inline SpawnExpr — this is what makes a real impl
+                // method or a Vec/Map/Set method reachable through a
+                // struct field (e.g. `b.items.push(x)`, or a genuine
+                // `h.c.increment()` impl-method call), which previously
+                // fell through to meaningless field-access-then-call
+                // lowering on both fronts (confirmed by testing both
+                // shapes independently before this fix).
+                std::string obj_type = resolve_expr_type(*obj_node, b);
                 if (!obj_type.empty() &&
                     b.known_methods.count(obj_type + "::" + method_name)) {
-                    std::string obj_reg = lower_expr(*obj_node, b);
-                    std::string obj_ptr = b.new_reg();
-                    b.emit(IROpcode::AddrOf, obj_ptr, {obj_reg}, "", n.span.line);
+                    std::string obj_ptr;
+                    if (obj_node->kind == NodeKind::MemberExpr &&
+                        !obj_node->children.empty() && obj_node->children[0]) {
+                        // obj_node itself is a field access (e.g. `c`
+                        // in `h.c.increment()`) — take the address of
+                        // the real field directly via GEPAddr, rather
+                        // than lower_expr+AddrOf, which would take the
+                        // address of a throwaway value-copy instead
+                        // (see GEPAddr's own comment in ir.hpp for why
+                        // this matters: a mutating method call through
+                        // this path would otherwise silently mutate
+                        // the copy, not the original field).
+                        std::string base_reg = lower_expr(*obj_node->children[0], b);
+                        obj_ptr = b.new_reg();
+                        b.emit(IROpcode::GEPAddr, obj_ptr, {base_reg}, obj_node->value, n.span.line);
+                    } else if (obj_node->kind == NodeKind::Identifier && obj_node->value == "self") {
+                        // Inside a method, `self` IS the receiver pointer (XIL's
+                        // implicit-self is a genuine pointer parameter). Taking
+                        // its address would pass a `T**` where the callee wants
+                        // `T*` — so a method calling another method on `self`
+                        // (`self.log(...)` from a default method, the most
+                        // ordinary use of nexus default methods) did not compile.
+                        obj_ptr = lower_expr(*obj_node, b);
+                    } else {
+                        std::string obj_reg = lower_expr(*obj_node, b);
+                        obj_ptr = b.new_reg();
+                        b.emit(IROpcode::AddrOf, obj_ptr, {obj_reg}, "", n.span.line);
+                    }
                     std::vector<std::string> args = {obj_ptr};
                     for (size_t i = 1; i < n.children.size(); i++) {
                         if (n.children[i]) args.push_back(lower_expr(*n.children[i], b));
                     }
                     std::string r = b.new_reg();
                     b.emit(IROpcode::Call, r, args, obj_type + "::" + method_name, n.span.line);
+                    return r;
+                }
+                // obj.method(args...) where obj's tracked type is a
+                // builtin Vec<T>/Map<K,V>/Set<T> collection (see
+                // monomorphize.cpp's instantiate_generic_type — these
+                // stay bracket-structured, e.g. "Vec<int>", rather than
+                // being flat-mangled like a real user generic). No
+                // "Type::method" free function exists for these (no
+                // ForgeDecl/impl was ever generated — see Part -6/-7 of
+                // XIL_RESTORE_STATUS.md), so this can't go through
+                // known_methods above. Instead, tag the Call's extra
+                // with a "$coll:" marker the emitter recognizes
+                // specially (see transpiler.cpp) and emits as a genuine
+                // C++ member-call (obj.push_back(x), obj.at(k), ...)
+                // rather than a free-function call. "$" can never
+                // collide with a real "Type::method" name — the lexer
+                // never produces an identifier starting with "$" (see
+                // lexer.cpp's lex_word: only alpha/'_' start a word),
+                // so this marker is unambiguous. The object itself
+                // (not &object — unlike the real-method-call case
+                // above, since std::vector/map/set methods are called
+                // on the value/reference directly, with no XIL-style
+                // pointer-self convention to match) is operands[0],
+                // followed by the call's own arguments.
+                if (!obj_type.empty() &&
+                    (obj_type.compare(0, 4, "Vec<") == 0 ||
+                     obj_type.compare(0, 4, "Map<") == 0 ||
+                     obj_type.compare(0, 4, "Set<") == 0)) {
+                    std::string obj_reg;
+                    bool obj_is_ptr = false;
+                    if (obj_node->kind == NodeKind::MemberExpr &&
+                        !obj_node->children.empty() && obj_node->children[0]) {
+                        // Same copy problem as the real-impl-method
+                        // case above: obj_node is itself a field
+                        // access (e.g. `items` in `b.items.push(x)`),
+                        // so lower_expr(*obj_node, b) would GEP-copy
+                        // the field into a throwaway register and
+                        // push/set/etc. would mutate the copy, not the
+                        // real field. Use GEPAddr for the pointer
+                        // instead — operands[0] stays a plain register
+                        // reference (never itself prefixed/decorated,
+                        // so every other operands[0] consumer —
+                        // infer_operand_type, used_as_operand tracking,
+                        // etc. — keeps working unmodified); the
+                        // "$collptr:" extra prefix (vs. plain
+                        // "$coll:") tells the emitter this particular
+                        // operands[0] is a pointer needing "*"/"->"
+                        // dereference, matching how GEP's own is_ptr
+                        // detection already distinguishes pointer vs.
+                        // value receivers elsewhere in this file.
+                        std::string base_reg = lower_expr(*obj_node->children[0], b);
+                        obj_reg = b.new_reg();
+                        b.emit(IROpcode::GEPAddr, obj_reg, {base_reg}, obj_node->value, n.span.line);
+                        obj_is_ptr = true;
+                    } else {
+                        obj_reg = lower_expr(*obj_node, b);
+                    }
+                    std::vector<std::string> args = {obj_reg};
+                    for (size_t i = 1; i < n.children.size(); i++) {
+                        if (n.children[i]) args.push_back(lower_expr(*n.children[i], b));
+                    }
+                    std::string r = b.new_reg();
+                    b.emit(IROpcode::Call, r, args,
+                           (obj_is_ptr ? "$collptr:" : "$coll:") + method_name, n.span.line);
                     return r;
                 }
             }
@@ -541,7 +832,26 @@ static std::string lower_expr(const ASTNode& n, IRBuilder& b) {
             std::string rhs = lower_expr(*n.children[1], b);
             std::string lhs = lower_expr(*n.children[0], b);
             b.emit(IROpcode::Store, "", {rhs, lhs}, n.value, n.span.line);
+            {
+                auto ot = n.attrs.find("opty");
+                if (ot != n.attrs.end()) b.cur_blk->instrs.back().ty = ot->second;
+            }
             return rhs;
+        }
+
+        case NodeKind::CastExpr: {
+            // cast(x, T): a call of the pseudo-function `$cast`; the emitter picks
+            // the conversion from the SOURCE type (sign/zero-extend, float -> int
+            // saturates) and the target `ty`. Previously fell to "%undef".
+            if (n.children.empty()) return "%err";
+            std::string V = lower_expr(*n.children[0], b);
+            std::string r = b.new_reg();
+            b.emit(IROpcode::Call, r, {V}, "$cast", n.span.line);
+            auto& ins = b.cur_blk->instrs.back();
+            ins.ty = n.extra;
+            auto f = n.attrs.find("from");
+            if (f != n.attrs.end()) ins.from_ty = f->second;
+            return r;
         }
 
         case NodeKind::SpawnExpr: {
@@ -570,6 +880,22 @@ static std::string lower_expr(const ASTNode& n, IRBuilder& b) {
                 std::string field_reg = b.new_reg();
                 b.emit(IROpcode::GEP, field_reg, {r}, fname, child->span.line);
                 b.emit(IROpcode::Store, "", {val, field_reg}, fname, child->span.line);
+            }
+            // Fields the spawn did not mention take their declared default.
+            auto ord = b.known_struct_field_order.find(n.value);
+            if (ord != b.known_struct_field_order.end()) {
+                std::unordered_set<std::string> given;
+                for (auto& child : n.children)
+                    if (child && child->attrs.count("field")) given.insert(child->attrs.at("field"));
+                for (auto& fname : ord->second) {
+                    if (given.count(fname)) continue;
+                    auto dit = b.known_struct_defaults.find(n.value + "::" + fname);
+                    if (dit == b.known_struct_defaults.end()) continue;
+                    std::string val = lower_expr(*dit->second, b);
+                    std::string field_reg = b.new_reg();
+                    b.emit(IROpcode::GEP, field_reg, {r}, fname, n.span.line);
+                    b.emit(IROpcode::Store, "", {val, field_reg}, fname, n.span.line);
+                }
             }
             return r;
         }
@@ -605,6 +931,46 @@ static std::string lower_expr(const ASTNode& n, IRBuilder& b) {
 }
 
 // ── Statement lowering ────────────────────────────────────────
+// XPhage type of an initializer expression when it can be read off a declared
+// signature: `f(...)` is f's return type; `f(...)?` is the Ok/Some payload
+// type of f's Result-like/Option-like return enum. Empty when unknown. Used to
+// give `atom xs = load(n)` / `shadow xs = load(n)?` a tracked type, so a later
+// `xs.push(x)` is recognised as a Vec method instead of being lowered as an
+// ordinary field-access call.
+static std::string init_type_of(const ASTNode& e, const IRBuilder& b) {
+    // `obj.method(...)`: the method's declared return type, found through the
+    // receiver's type (a local, `self`, a nested field, ...). Without this a
+    // later call on the result — `atom c = b.rebox(9); c.get()` — was lowered
+    // as a field read followed by a call of the loaded value.
+    if (e.kind == NodeKind::CallExpr && !e.children.empty() && e.children[0] &&
+        e.children[0]->kind == NodeKind::MemberExpr && !e.children[0]->children.empty() &&
+        e.children[0]->children[0]) {
+        IRBuilder& mb = const_cast<IRBuilder&>(b);   // resolve_expr_type only reads
+        std::string ot = resolve_expr_type(*e.children[0]->children[0], mb);
+        if (!ot.empty()) {
+            auto mit = b.method_ret_types.find(ot + "::" + e.children[0]->value);
+            if (mit != b.method_ret_types.end()) return mit->second;
+        }
+        return std::string();
+    }
+    if (e.kind == NodeKind::CallExpr && !e.children.empty() && e.children[0] &&
+        e.children[0]->kind == NodeKind::Identifier) {
+        auto it = b.fn_ret_types.find(e.children[0]->value);
+        return it != b.fn_ret_types.end() ? it->second : std::string();
+    }
+    if (e.kind == NodeKind::PropagateExpr && !e.children.empty() && e.children[0]) {
+        std::string en = init_type_of(*e.children[0], b);
+        auto eit = b.known_enums.find(en);
+        if (eit == b.known_enums.end()) return std::string();
+        for (auto& v : eit->second->children) {
+            if (v && v->kind == NodeKind::EnumVariant && (v->value == "Ok" || v->value == "Some") &&
+                v->children.size() == 1 && v->children[0])
+                return v->children[0]->extra;
+        }
+    }
+    return std::string();
+}
+
 static void lower_stmt(const ASTNode& n, IRBuilder& b);
 
 static void lower_block(const ASTNode& blk, IRBuilder& b) {
@@ -631,6 +997,9 @@ static void lower_stmt(const ASTNode& n, IRBuilder& b) {
             } else if (!n.children.empty() && n.children[0] &&
                        n.children[0]->kind == NodeKind::SpawnExpr) {
                 b.var_types[n.value] = n.children[0]->value;
+            } else if (!n.children.empty() && n.children[0]) {
+                std::string it = init_type_of(*n.children[0], b);
+                if (!it.empty()) b.var_types[n.value] = it;
             }
             if (!n.children.empty() && n.children[0]) {
                 std::string val = lower_expr(*n.children[0], b);
@@ -916,6 +1285,8 @@ static void lower_stmt(const ASTNode& n, IRBuilder& b) {
                 // (before the first '.') names a known enum — the
                 // same known_enums lookup CallExpr/MemberExpr use for
                 // variant construction.
+                std::string arm_saved_binding, arm_prev_type;
+                bool arm_had_prev = false;
                 size_t dot = arm->value.find('.');
                 bool is_enum_pattern = false;
                 if (dot != std::string::npos) {
@@ -943,6 +1314,30 @@ static void lower_stmt(const ASTNode& n, IRBuilder& b) {
                     b.emit(IROpcode::EnumMatch, cond, {subj, binding}, arm->value, arm->span.line);
                     b.emit(IROpcode::BrCond, "", {cond, lbl_arm, lbl_next});
                     b.cur_blk = &b.cur_fn->new_block(lbl_arm);
+                    // The binding takes the payload type of the matched variant,
+                    // for the duration of this arm — so `v.len()` on an
+                    // `Option.Some(v)` whose payload is a Vec<int> is recognised
+                    // as a Vec method. (It used to resolve only by accident: an
+                    // unrelated `v` declared in another function leaked into this
+                    // one through the unscoped var_types map.) Restored after the
+                    // arm so the name cannot outlive it.
+                    if (!binding.empty()) {
+                        std::string en = arm->value.substr(0, dot), vn = arm->value.substr(dot + 1);
+                        auto eit = b.known_enums.find(en);
+                        if (eit != b.known_enums.end()) {
+                            for (auto& vv : eit->second->children) {
+                                if (vv && vv->kind == NodeKind::EnumVariant && vv->value == vn &&
+                                    !vv->children.empty() && vv->children[0] && !vv->children[0]->extra.empty()) {
+                                    auto prev = b.var_types.find(binding);
+                                    arm_saved_binding = binding;
+                                    arm_had_prev = prev != b.var_types.end();
+                                    if (arm_had_prev) arm_prev_type = prev->second;
+                                    b.var_types[binding] = vv->children[0]->extra;
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 } else if (arm->value != "_") {
                     std::string cond = b.new_reg();
                     b.emit(IROpcode::Eq, cond, {subj, arm->value});
@@ -955,6 +1350,10 @@ static void lower_stmt(const ASTNode& n, IRBuilder& b) {
                     if (arm->children[0]->kind == NodeKind::Block)
                         lower_block(*arm->children[0], b);
                     else lower_expr(*arm->children[0], b);
+                }
+                if (!arm_saved_binding.empty()) {
+                    if (arm_had_prev) b.var_types[arm_saved_binding] = arm_prev_type;
+                    else              b.var_types.erase(arm_saved_binding);
                 }
                 b.emit(IROpcode::Br, "", {lbl_end});
                 b.cur_blk = &b.cur_fn->new_block(lbl_next);
@@ -1040,6 +1439,10 @@ IRModule lower_to_ir(const Program& ast, const std::string& module_name) {
         if (node->kind == NodeKind::EnumDecl && !node->value.empty()) {
             builder.known_enums[node->value] = node;
         }
+        if ((node->kind == NodeKind::PulseDecl || node->kind == NodeKind::AsyncPulseDecl) &&
+            !node->value.empty() && !node->extra2.empty()) {
+            builder.fn_ret_types[node->value] = node->extra2;
+        }
         for (auto& c : node->children) collect_enums(c);
     };
     for (auto& top : ast) collect_enums(top);
@@ -1048,19 +1451,74 @@ IRModule lower_to_ir(const Program& ast, const std::string& module_name) {
     // Type { ... }` block's method names into known_methods, keyed
     // "Type::method" — see IRBuilder::known_methods for why. Also
     // walks into realms.
+    std::vector<std::string> impl_realm_path;
     std::function<void(const ASTNodePtr&)> collect_impls;
     collect_impls = [&](const ASTNodePtr& node) {
         if (!node) return;
         if (node->kind == NodeKind::ImplDecl && !node->extra.empty()) {
-            for (auto& method : node->children) {
-                if (method && !method->value.empty()) {
-                    builder.known_methods.insert(node->extra + "::" + method->value);
+            // A method of a realm member is called through the qualified
+            // receiver type (`Zoo::Lion::sound`) while the declaration only
+            // carries `Lion`; register both spellings, or a method call inside
+            // (or onto) a realm type is not recognised as a method at all.
+            std::vector<std::string> recvs = {node->extra};
+            if (!impl_realm_path.empty()) {
+                std::string q;
+                for (auto& r : impl_realm_path) q += r + "::";
+                recvs.push_back(q + node->extra);
+            }
+            for (auto& recv : recvs) {
+                for (auto& method : node->children) {
+                    if (method && !method->value.empty()) {
+                        builder.known_methods.insert(recv + "::" + method->value);
+                        if (!method->extra2.empty())
+                            builder.method_ret_types[recv + "::" + method->value] = method->extra2;
+                    }
                 }
             }
         }
+        const bool is_realm = node->kind == NodeKind::RealmDecl;
+        if (is_realm) impl_realm_path.push_back(node->value);
         for (auto& c : node->children) collect_impls(c);
+        if (is_realm) impl_realm_path.pop_back();
     };
     for (auto& top : ast) collect_impls(top);
+
+    // Pre-pass: record every `forge Type { field: FieldType, ... }`
+    // declaration's field types into known_struct_fields, keyed
+    // "Type::field" — see IRBuilder::known_struct_fields for why.
+    // Also walks into realms, matching collect_enums/collect_impls.
+    std::vector<std::string> struct_realm_path;
+    std::function<void(const ASTNodePtr&)> collect_struct_fields;
+    collect_struct_fields = [&](const ASTNodePtr& node) {
+        if (!node) return;
+        if (node->kind == NodeKind::ForgeDecl && !node->value.empty()) {
+            // Register under the bare name AND the realm-qualified one: a
+            // spawn/type reference to a realm member is written
+            // `Realm::Type`, while the declaration node itself only
+            // carries `Type`.
+            std::vector<std::string> names = {node->value};
+            if (!struct_realm_path.empty()) {
+                std::string q;
+                for (auto& r : struct_realm_path) q += r + "::";
+                names.push_back(q + node->value);
+            }
+            for (auto& nm : names) {
+                for (auto& field : node->children) {
+                    if (!field || field->kind != NodeKind::FieldDecl || field->value.empty()) continue;
+                    if (!field->extra.empty())
+                        builder.known_struct_fields[nm + "::" + field->value] = field->extra;
+                    builder.known_struct_field_order[nm].push_back(field->value);
+                    if (!field->children.empty() && field->children[0])
+                        builder.known_struct_defaults[nm + "::" + field->value] = field->children[0].get();
+                }
+            }
+        }
+        const bool is_realm = node->kind == NodeKind::RealmDecl;
+        if (is_realm) struct_realm_path.push_back(node->value);
+        for (auto& c : node->children) collect_struct_fields(c);
+        if (is_realm) struct_realm_path.pop_back();
+    };
+    for (auto& top : ast) collect_struct_fields(top);
 
     std::function<void(const ASTNodePtr&)> lower_top;
     lower_top = [&](const ASTNodePtr& top) {
@@ -1356,6 +1814,26 @@ IRModule lower_to_ir(const Program& ast, const std::string& module_name) {
                     break;
                 }
 
+                // Typed parameters are variables with a known type too. var_types
+                // used to be filled only from atom/shadow declarations, so inside
+                // `pulse total(v: Vec<int>)` the receiver `v` had no tracked type
+                // and `v.get(i)` / `v.len()` were not recognised as Vec methods
+                // (lowered as ordinary calls, which left an unresolved register
+                // and failed in C++). Register them before the body is lowered
+                // and put the previous map back afterwards so one function's
+                // parameter names never leak into the next.
+                auto saved_var_types = builder.var_types;
+                for (auto& c : top->children) {
+                    if (!c || c->kind != NodeKind::FieldDecl || c->value.empty() || c->extra.empty()) continue;
+                    std::string pty = c->extra;
+                    for (;;) {   // ownership qualifiers change passing, not the type
+                        if (pty.compare(0, 4, "own ") == 0)          pty = pty.substr(4);
+                        else if (pty.compare(0, 4, "ref ") == 0)     pty = pty.substr(4);
+                        else if (pty.compare(0, 8, "mut_ref ") == 0) pty = pty.substr(8);
+                        else break;
+                    }
+                    if (pty != "auto") builder.var_types[c->value] = pty;
+                }
                 // Lower body block
                 for (auto& c : top->children) {
                     if (c && c->kind == NodeKind::Block) {
@@ -1365,6 +1843,7 @@ IRModule lower_to_ir(const Program& ast, const std::string& module_name) {
                 // Implicit return void if no return stmt
                 if (ret == IRType::Void)
                     builder.emit(IROpcode::Ret, "", {"void"});
+                builder.var_types = std::move(saved_var_types);
                 // Reset so the next top-level node (if it's a bare
                 // statement, not another declaration) correctly
                 // triggers creation of its own implicit main() rather

@@ -1,0 +1,11 @@
+~link "core"
+
+pulse main() {
+    atom s = option_some(41)
+    atom a = option_expect(s, "must have a value")
+    atom good: Result<int, str> = Result.Ok(8)
+    atom u = result_unwrap(good)
+    atom bridged: Result<int, str> = option_ok_or(s, "none")
+    atom b = result_unwrap_or(bridged, 0)
+    beam f"a={a} u={u} b={b}"
+}

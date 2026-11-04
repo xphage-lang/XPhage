@@ -1,0 +1,11 @@
+pulse fill(v: Vec<int>) {
+    v.push(1)
+    v.push(2)
+    beam f"inside={v.len()}"
+}
+pulse main() {
+    atom xs: Vec<int> = spawn Vec<int> { }
+    xs.push(99)
+    fill(xs)
+    beam f"outside={xs.len()}"
+}

@@ -1,0 +1,9 @@
+pulse eq(s: str) -> int {
+    if s == "1" { return 1 }
+    return 0
+}
+pulse main() {
+    atom a = eq("1")
+    atom b = eq("2")
+    beam f"eq1={a} eq2={b}"
+}

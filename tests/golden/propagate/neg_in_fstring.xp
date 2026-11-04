@@ -1,0 +1,13 @@
+enum Result<T, E> { Ok(T)  Err(E) }
+pulse parse(s: str) -> Result<int, str> {
+    if s == "1" { return Result.Ok(1) }
+    return Result.Err("bad")
+}
+pulse run(s: str) -> Result<int, str> {
+    beam f"value={parse(s)?}"
+    return Result.Ok(0)
+}
+pulse main() {
+    atom r = run("1")
+    beam f"done"
+}

@@ -24,6 +24,7 @@ typedef struct {
 
 XpStr*  xprt_str_new(const char* literal);
 XpStr*  xprt_str_from_int(int64_t v);
+XpStr*  xprt_str_from_uint(uint64_t v);
 XpStr*  xprt_str_from_float(double v);
 XpStr*  xprt_str_from_bool(int v);
 XpStr*  xprt_str_concat(XpStr* a, XpStr* b);
@@ -31,6 +32,8 @@ XpStr*  xprt_str_concat_cstr(XpStr* a, const char* b);
 XpStr*  xprt_str_format(const char* fmt, ...); // f-string helper
 int64_t xprt_str_len(XpStr* s);
 int     xprt_str_eq(XpStr* a, XpStr* b);
+/* Lexicographic, byte-wise (std::string::compare): <0, 0, >0. Null sorts as "". */
+int     xprt_str_cmp(XpStr* a, XpStr* b);
 int     xprt_str_eq_cstr(XpStr* s, const char* c);
 XpStr*  xprt_str_trim(XpStr* s);
 XpStr*  xprt_str_upper(XpStr* s);
@@ -42,6 +45,7 @@ const char* xprt_str_cstr(XpStr* s);
 // ── Beam (print) ──────────────────────────────────────────────
 void xprt_beam_str(XpStr* s);
 void xprt_beam_int(int64_t v);
+void xprt_beam_uint(uint64_t v);
 void xprt_beam_float(double v);
 void xprt_beam_bool(int v);
 void xprt_beam_newline(void);
@@ -84,6 +88,8 @@ void    xprt_vec_push(XpVec* v, void* item);
 void*   xprt_vec_get(XpVec* v, int64_t i);
 int64_t xprt_vec_len(XpVec* v);
 void    xprt_vec_free(XpVec* v);
+XpVec*  xprt_vec_clone(const XpVec* v);
+_Noreturn void xprt_panic(XpStr* msg);   // print `panic: <msg>` to stderr, exit(101)   // independent copy (by-value parameter semantics)
 
 // ── XpMap: string→void* hash map ─────────────────────────────
 typedef void* XpMap;

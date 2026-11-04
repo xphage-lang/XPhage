@@ -1,0 +1,1 @@
+pulse main() { beam 1.5 << 1 }

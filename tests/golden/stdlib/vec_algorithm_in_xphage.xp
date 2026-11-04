@@ -1,0 +1,28 @@
+pulse total(v: Vec<int>) -> int {
+    shadow t: int = 0
+    for i in 0..v.len() {
+        t = t + v.get(i)
+    }
+    return t
+}
+pulse count_str(v: Vec<str>, x: str) -> int {
+    shadow n: int = 0
+    for i in 0..v.len() {
+        if v.get(i) == x { n = n + 1 }
+    }
+    return n
+}
+pulse main() {
+    atom xs: Vec<int> = spawn Vec<int> { }
+    xs.push(3)
+    xs.push(4)
+    xs.push(5)
+    beam f"total={total(xs)}"
+    atom ss: Vec<str> = spawn Vec<str> { }
+    ss.push("a")
+    ss.push("b")
+    ss.push("a")
+    atom needle = "a"
+    atom c = count_str(ss, needle)
+    beam f"count={c}"
+}

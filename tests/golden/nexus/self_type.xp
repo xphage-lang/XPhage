@@ -1,0 +1,16 @@
+// `Self` in nexus signatures and in impl bodies (including `spawn Self`).
+nexus Eq  { eq(other: Self) -> bool }
+nexus Dup { dup() -> Self }
+forge P { x: int = 0 }
+impl Eq for P  { eq(other: Self) -> bool { return self.x == other.x } }
+impl Dup for P { dup() -> Self { return spawn Self { x: self.x + 1 } } }
+pulse same<T: Eq>(a: T, b: T) -> bool { return a.eq(b) }
+pulse main() {
+    atom a = spawn P { x: 1 }
+    atom b = spawn P { x: 1 }
+    atom c = spawn P { x: 2 }
+    beam same(a, b)
+    beam same(a, c)
+    atom d = a.dup()
+    beam d.x
+}

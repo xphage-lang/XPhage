@@ -1,0 +1,33 @@
+enum Option<T> { Some(T)  None }
+
+pulse find(k: int) -> Option<int> {
+    if k == 1 { return Option.Some(10) }
+    if k == 2 { return Option.Some(20) }
+    return Option.None
+}
+
+pulse doubled(k: int) -> Option<int> {
+    atom v = find(k)?
+    return Option.Some(v * 2)
+}
+
+pulse sum_two(a: int, b: int) -> Option<int> {
+    atom x = find(a)?
+    atom y = find(b)?
+    return Option.Some(x + y)
+}
+
+pulse show(tag: str, o: Option<int>) {
+    probe o {
+        diverge Option.Some(v) -> { beam f"{tag}=some {v}" }
+        diverge Option.None -> { beam f"{tag}=none" }
+    }
+}
+
+pulse main() {
+    show("d1", doubled(1))
+    show("d9", doubled(9))
+    show("s12", sum_two(1, 2))
+    show("s19", sum_two(1, 9))
+    show("s91", sum_two(9, 1))
+}

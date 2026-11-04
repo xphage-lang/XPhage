@@ -1,0 +1,29 @@
+enum Result<T, E> {
+    Ok(T)
+    Err(E)
+}
+
+pulse parse(s: str) -> Result<int, str> {
+    if s == "1" { return Result.Ok(1) }
+    if s == "2" { return Result.Ok(2) }
+    return Result.Err("bad input")
+}
+
+pulse add_parsed(a: str, b: str) -> Result<int, str> {
+    atom x = parse(a)?
+    atom y = parse(b)?
+    return Result.Ok(x + y)
+}
+
+pulse show(r: Result<int, str>) {
+    probe r {
+        diverge Result.Ok(v) -> { beam f"ok={v}" }
+        diverge Result.Err(e) -> { beam f"err={e}" }
+    }
+}
+
+pulse main() {
+    show(add_parsed("1", "2"))
+    show(add_parsed("1", "x"))
+    show(add_parsed("x", "2"))
+}

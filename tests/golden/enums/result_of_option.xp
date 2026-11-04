@@ -1,0 +1,27 @@
+enum Option<T> {
+    Some(T)
+    None
+}
+enum Result<T, E> {
+    Ok(T)
+    Err(E)
+}
+
+pulse lookup(k: int) -> Result<Option<int>, str> {
+    if k < 0 { return Result.Err("negative") }
+    if k == 0 { return Result.Ok(Option.None) }
+    return Result.Ok(Option.Some(k * 10))
+}
+
+pulse main() {
+    atom r = lookup(5)
+    probe r {
+        diverge Result.Ok(o) -> {
+            probe o {
+                diverge Option.Some(v) -> { beam f"found={v}" }
+                diverge Option.None -> { beam f"empty" }
+            }
+        }
+        diverge Result.Err(e) -> { beam f"err={e}" }
+    }
+}

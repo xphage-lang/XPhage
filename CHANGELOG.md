@@ -4,6 +4,54 @@ All notable changes to the **X-Phage** project from its genesis to the current *
 
 ---
 
+## [3.6.0-dev] - 2026-10-27 (Sized numeric types)
+### Added
+- **Sized numeric types** `i8 i16 i32 i64 isize u8 u16 u32 u64 usize f32 f64` (aliases `int=i64`, `float=f64`, `byte=u8`), literal suffixes (`255u8`, `1.5f32`), digit separators, `0b` binary and normalised hex literals. No implicit conversion between sized types; arithmetic wraps; shifts mask; `cast` defined (saturating float -> int). Spec: `docs/NUMERIC_TYPES.md`.
+- New pass `annotate_numeric_types` (`xphage_sema/numeric_types.cpp`), run after monomorphization: types every expression, reports `XP2050`-`XP2054`, annotates the AST for all three backends.
+- Parser pre-parses f-string interpolations into the literal's children (`attrs["parts"]`); the typer, monomorphization, trait lowering and the backends all see them (generic calls, `T::f()` and primitive-method calls inside f-strings now work).
+- Compound assignment `%= &= |= ^= <<= >>=` (lexer, parser, all backends).
+- `xprt_beam_uint`, `xprt_str_from_uint`; generated C++ is compiled with `-fwrapv -Wno-overflow`.
+- Impls on sized types (`impl Ord for u8`), `Numeric` bound satisfied by sized types, literal suffixes honoured by generic inference.
+- Exact-width FFI signatures; LLVM marshals `str` <-> `const char*` for extern calls.
+- Generics: explicit and inferred type arguments accept suffixed/negated sized literals; sized-literal receivers in primitive-method rewriting.
+- Spec: `docs/NUMERIC_TYPES.md`.
+- Golden suite 102 -> 119.
+
+### Fixed
+- XIL: `&`, `|`, `^`, `<<`, `>>` were all emitted as `+`; compound assignment (`x += 5`) stored `5` (the operator was ignored); `cast(...)` lowered to `undef`.
+- LLVM: `for x in <collection>` silently ran zero iterations (now a loud error); `%= &= |= ^= <<= >>=` on `int` left the variable unchanged; a typed `for i in 0..n` loop; `extern "C" { ... }` blocks were never declared; hex literals evaluated to 0.
+
+## [3.6.0-dev] - 2026-10-10 (Trait system v2: associated functions, primitive impls)
+### Added
+- **Associated (receiver-less) functions.** A member written with `pulse` and without a `self` parameter has no receiver: `impl Point { pulse origin() -> Self { ... } }`, `Point::origin()`. Allowed in a `nexus` too (`nexus Default { pulse default() -> Self }`), including static default bodies that call each other through `Self::`. `lower_assoc_functions` (after monomorphization) hoists them to free functions `<Type>__<fn>` and rewrites the calls, so no backend needed to learn about them.
+- **`T::f()` in generic bodies**: the head of a path that names a type parameter is substituted by the concrete type during monomorphization.
+- **Explicit type arguments on calls**: `make<Tri>()`, `first<int, str>(7, "x")` (token-lookahead in the parser; `a < b` still compares). Needed whenever a type parameter occurs in no argument.
+- **Impls on primitives**: `impl Ord for int { cmp(other: Self) -> int { ... } }`, `impl Default for str { pulse default() -> Self { return "" } }`. Their methods become free functions `int__cmp(__self, ...)`; a call on a receiver whose type is known (bounded `a: T` after monomorphization, annotated/initialized local, field, literal, operator, declared return type) is rewritten to it.
+- `XP2019` (no such associated function on the type / not provided by the type parameter's bounds); `XP2017` now also reports an associated function implemented as a method and vice versa.
+- Runtime: `xprt_str_cmp`.
+- Golden suite 92 -> 102.
+
+### Fixed
+- LLVM backend: `+` on two strings produced `add ptr` (failed IR verification); `<`/`<=`/`>`/`>=` on strings compared addresses or asserted inside LLVM (`max("pear","apple")` returned `"apple"`); an un-annotated `atom x = <expr>` whose initializer was not one of a few recognised shapes got an `i64` slot (new static expression typer decides the slot type before the initializer is generated).
+- Inside a realm, `Self` now expands to the realm-qualified receiver (`Zoo::Lion`), which is the form every backend resolves.
+
+## [3.6.0-dev] - 2026-10-05 (Trait system v1: nexus)
+### Added
+- **`nexus` is now a working compile-time contract** (language book Chapter 8). New backend-independent pass `xphage_sema/trait_expand.{hpp,cpp}`, run on the merged program before semantic analysis in all three compile entry points:
+  - default methods (book 8.4) are cloned into every `impl N for T` that does not override them;
+  - `Self` is substituted by the impl's receiver type (parameters, returns, locals, `spawn Self {}`); inside a nexus it is checked per impl.
+- Semantic checks, each with its own code: `XP2014` nexus used as a type, `XP2015` impl missing a required method, `XP2016` unknown nexus (in an impl or in a bound), `XP2017` method arity/parameter/return type differs from the nexus, `XP2018` method not a member of the nexus.
+- Multiple bounds: `pulse f<T: Named + Aged>(x: T)`; the failing bound is named in `XP2012`.
+- Implicit `self` in impl methods is bound in the analyzer (the form the book uses everywhere: `name() -> str { return self.name }`).
+- `Makefile` (make-only build, header dependency tracking, optional `LLVM=1 LLVM_ROOT=...`).
+- Golden suite 77 -> 92 checks: 15 nexus tests (4 positive, 3 edge, 8 diagnostics).
+
+### Fixed
+- Generics: an unannotated `atom d = spawn Dog {}` was not typed, so `describe(d)` left `T` uninferrable and the generic call went unspecialized; `spawn Box<T> {}` inside a generic `impl<T>` was not substituted, producing a bogus `Box__T` (`'T' does not name a type`) for every method that builds a value of its own type.
+- AST transpiler: abstract struct emitted for every nexus (return type read from the wrong AST field, so every method was `void`; cannot represent `Self`/generic signatures) - nexus now emits nothing; a field and a method with the same name (the book's own `forge Dog { name }` + `name()`) is a C++ error - colliding fields are emitted as `<name>__f`; `self` alias was only created for methods with an explicit `self` parameter; `const` on call-initialized struct atoms rejected every method call on them; `beam <bool>` printed `1`/`0` instead of `true`/`false` (also XIL).
+- XIL: `self.other_method()` passed `T**`; `spawn` ignored non-zero forge field defaults; `atom c = obj.m()` left `c` untyped; methods of realm members were not recognised as methods.
+- LLVM backend: impl methods did not exist (no `self` parameter, no call lowering, no forward declaration); nested field access silently evaluated to `0`; **field assignment (`p.x = v`, `self.n += 1`) was silently dropped**; `spawn` ignored field defaults; `xprt_beam_bool` was declared `i1` against the runtime's C `int`, failing IR verification for every `beam <bool expression>`.
+
 ## [3.5.2] - 2026-07-02 (Diagnostic Engine + Semantic Analyzer)
 ### Added
 - **Diagnostic Engine** (`xphage_sema/diagnostic.{hpp,cpp}`): structured diagnostics with a stable error code (`XP1000`-`XP9999` ranges, matching the language's own design spec), severity, source span, and rustc-style multi-line rendering — location line, source snippet, `^^^^` underline sized to the actual offending token, and an optional `help:` suggestion line.

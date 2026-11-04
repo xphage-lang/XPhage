@@ -1,0 +1,2 @@
+forge P { x: int = 0 }
+pulse main() { atom a = P::nothing()  beam a.x }

@@ -1,0 +1,11 @@
+enum Result<T, E> { Ok(T)  Err(E) }
+
+pulse show(r: Result<int, str>) {
+    probe r {
+        diverge Result.Ok(v) -> { beam f"ok={v}" }
+        diverge Result.Err(e) -> { beam f"err={e}" }
+    }
+}
+pulse main() {
+    show(Result.Ok(5))
+}

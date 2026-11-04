@@ -1,0 +1,25 @@
+enum Result<T, E> { Ok(T)  Err(E) }
+
+pulse step(name: str, ok: bool, v: int) -> Result<int, str> {
+    beam f"eval {name}"
+    if ok { return Result.Ok(v) }
+    return Result.Err(f"{name} failed")
+}
+
+pulse add3(a: bool, b: bool, c: bool) -> Result<int, str> {
+    atom total = step("A", a, 1)? + step("B", b, 10)? + step("C", c, 100)?
+    return Result.Ok(total)
+}
+
+pulse show(r: Result<int, str>) {
+    probe r {
+        diverge Result.Ok(v) -> { beam f"=> ok {v}" }
+        diverge Result.Err(e) -> { beam f"=> err {e}" }
+    }
+}
+
+pulse main() {
+    show(add3(true, true, true))
+    show(add3(true, false, true))
+    show(add3(false, true, true))
+}

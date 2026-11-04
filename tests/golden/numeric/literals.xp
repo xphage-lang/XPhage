@@ -1,0 +1,9 @@
+// Literal forms: digit separators, hex, binary, type suffixes, exponents.
+pulse main() {
+    beam 1_000 + 0xFF
+    beam 0b1010_1010u8
+    beam -128i8
+    beam 1e3
+    beam 2.5f32 * 2f32
+    beam 0xFFFFFFFFu32
+}

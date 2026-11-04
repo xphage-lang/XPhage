@@ -1,0 +1,4 @@
+nexus Default { pulse default() -> Self }
+forge P { x: int = 0 }
+impl Default for P { default() -> Self { return spawn Self { x: 7 } } }
+pulse main() { beam 1 }

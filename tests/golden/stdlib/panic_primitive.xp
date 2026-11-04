@@ -1,0 +1,5 @@
+pulse main() {
+    beam f"before"
+    panic("boom")
+    beam f"after-must-not-print"
+}

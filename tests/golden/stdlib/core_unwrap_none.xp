@@ -1,0 +1,10 @@
+~link "core"
+pulse find(k: int) -> Option<int> {
+    if k == 1 { return Option.Some(1) }
+    return Option.None
+}
+pulse main() {
+    beam f"start"
+    atom v = option_unwrap(find(2))
+    beam f"unreachable {v}"
+}

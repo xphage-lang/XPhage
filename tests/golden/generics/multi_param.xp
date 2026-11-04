@@ -1,0 +1,16 @@
+forge Pair<A, B> {
+    first: A
+    second: B
+}
+
+pulse swap_first<A, B>(p: Pair<A, B>) -> A {
+    return p.first
+}
+
+pulse main() {
+    atom p: Pair<int, str> = spawn Pair<int, str> { first: 7, second: "x" }
+    atom q: Pair<str, int> = spawn Pair<str, int> { first: "hello", second: 9 }
+    atom a = swap_first(p)
+    atom b = swap_first(q)
+    beam f"a={a} b={b}"
+}

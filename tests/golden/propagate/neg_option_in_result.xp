@@ -1,0 +1,7 @@
+enum Option<T> { Some(T)  None }
+enum Result<T, E> { Ok(T)  Err(E) }
+pulse find(k: int) -> Option<int> { return Option.None }
+pulse run() -> Result<int, str> {
+    atom x = find(1)?
+    return Result.Ok(x)
+}

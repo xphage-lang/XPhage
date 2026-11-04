@@ -3,37 +3,29 @@
 // ~link "collections"
 // ============================================================
 
-// ── Option<T> — replaces null ─────────────────────────────────
-forge Option {
-    has_value: bool = false
-    _data:     str  = ""
-    _type:     str  = "auto"
-}
-pulse option_some(value: auto) -> Option
-pulse option_none() -> Option
-pulse option_is_some(o: Option) -> bool
-pulse option_is_none(o: Option) -> bool
-pulse option_unwrap(o: Option) -> auto
-pulse option_unwrap_or(o: Option, default: auto) -> auto
-pulse option_map(o: Option, f: auto) -> Option
 
-// ── Result<T,E> — expected-error propagation ──────────────────
-forge Result {
-    ok:    bool = false
-    value: str  = ""
-    error: str  = ""
-}
-pulse result_ok(value: auto) -> Result
-pulse result_err(msg: str) -> Result
-pulse result_is_ok(r: Result) -> bool
-pulse result_is_err(r: Result) -> bool
-pulse result_unwrap(r: Result) -> auto
-pulse result_unwrap_err(r: Result) -> str
-pulse result_unwrap_or(r: Result, default: auto) -> auto
-pulse result_map(r: Result, f: auto) -> Result
+// Option<T> and Result<T, E> now live in the `core` module (real generic
+// enums written in XPhage). This module depends on it, so it is loaded for you.
+~link "core"
+
+
+// ============================================================
+// DEPRECATED: the string-handle API below (vec_*, map_*, set_*, queue_*,
+// stack_*). Generics have landed, so collections are now real typed
+// containers built into the language:
+//
+//     atom xs: Vec<int>      = spawn Vec<int> { }       xs.push(1)  xs.get(0)  xs.len()
+//     atom m:  Map<str, int> = spawn Map<str, int> { }  m.set("a", 1)  m.get("a")  m.has("a")
+//     atom s:  Set<str>      = spawn Set<str> { }       s.add("a")  s.has("a")
+//
+// This legacy layer stores every item as a string, cannot hold an int or
+// float (`vec_push(v, 7)` does not compile), re-splits the whole handle on
+// every read, and has no implementation at all on the LLVM backend. It stays
+// only until the typed replacement (generic vec_* / map_* helpers written in
+// XPhage) lands in this module; then it is removed.
+// ============================================================
 
 // ── Vec — dynamic array ───────────────────────────────────────
-// Until generics land (Phase 6), items are stored as strings internally
 pulse vec_new() -> str                         // returns handle
 pulse vec_push(v: str, item: auto) -> str
 pulse vec_pop(v: str) -> str                   // returns (new_v, item) pair

@@ -1,0 +1,9 @@
+pulse ident<T>(x: T) -> T {
+    return x
+}
+pulse main() {
+    atom s = ident("hello")
+    beam f"s={s}"
+    atom n = ident(41)
+    beam f"n={n}"
+}

@@ -1,0 +1,25 @@
+enum Value {
+    IntV(int)
+    FloatV(float)
+    BoolV(bool)
+    StrV(str)
+    Nothing
+}
+
+pulse describe(v: Value) {
+    probe v {
+        diverge Value.IntV(n)   -> { beam f"int {n}" }
+        diverge Value.FloatV(x) -> { beam f"float {x}" }
+        diverge Value.BoolV(b)  -> { beam f"bool {b}" }
+        diverge Value.StrV(s)   -> { beam f"str {s}" }
+        diverge Value.Nothing   -> { beam f"nothing" }
+    }
+}
+
+pulse main() {
+    describe(Value.IntV(42))
+    describe(Value.FloatV(2.5))
+    describe(Value.BoolV(true))
+    describe(Value.StrV("hi"))
+    describe(Value.Nothing)
+}

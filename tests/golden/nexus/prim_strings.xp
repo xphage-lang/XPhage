@@ -1,0 +1,16 @@
+// String operations every stdlib module leans on, identical on every backend.
+pulse main() {
+    atom a = "pear"
+    atom b = "apple"
+    atom c = "pe" + "ar"
+    atom d = c + "-x"
+    beam d
+    beam a < b
+    beam a > b
+    beam a == c
+    beam a != c
+    beam a <= c
+    beam a >= b
+    atom n = 2 * 1.5
+    beam n
+}

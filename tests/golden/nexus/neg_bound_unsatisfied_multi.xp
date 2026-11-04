@@ -1,0 +1,9 @@
+nexus Named { name() -> str }
+nexus Aged  { age() -> int }
+forge P { n: str = "" }
+impl Named for P { name() -> str { return self.n } }
+pulse card<T: Named + Aged>(x: T) -> str { return x.name() }
+pulse main() {
+    atom p = spawn P { n: "x" }
+    beam card(p)
+}

@@ -1,0 +1,34 @@
+~link "core"
+
+pulse parse(s: str) -> Result<int, str> {
+    if s == "7" { return Result.Ok(7) }
+    return Result.Err("not a number")
+}
+pulse doubled(s: str) -> Result<int, str> {
+    atom n = parse(s)?
+    return Result.Ok(n * 2)
+}
+pulse first_char_code(s: str) -> Option<int> {
+    if s == "a" { return Option.Some(97) }
+    return Option.None
+}
+pulse to_result(s: str) -> Result<int, str> {
+    return option_ok_or(first_char_code(s), "unknown char")
+}
+pulse main() {
+    atom d1 = doubled("7")
+    atom d2 = doubled("x")
+    atom a = result_unwrap_or(d1, 0)
+    atom b = result_unwrap_or(d2, -1)
+    beam f"d1={a} d2={b}"
+    atom t1 = to_result("a")
+    atom t2 = to_result("z")
+    atom c = result_unwrap_or(t1, 0)
+    atom d = result_unwrap_or(t2, 0)
+    beam f"c={c} d={d}"
+    atom e = result_err_to_option(d2)
+    atom ok = result_to_option(d1)
+    atom eh = option_is_some(e)
+    atom oh = option_is_some(ok)
+    beam f"err_some={eh} ok_some={oh}"
+}

@@ -4,6 +4,7 @@
 // AeonCoreX Lab
 // ============================================================
 #include "../include/parser.hpp"
+#include "../../xphage_lexer/include/lexer.hpp"
 #include <stdexcept>
 #include <iostream>
 #include <sstream>
@@ -54,6 +55,19 @@ const Token& Parser::expect(TokenType t, const std::string& msg) {
         error(msg + " (got '" + peek().value + "')");
     }
     return advance();
+}
+
+void Parser::expect_generic_close(const std::string& msg) {
+    if (check(RSHIFT)) {
+        // Split '>>' -> '>' '>': keep one '>' in place for the caller's
+        // enclosing generic, having consumed the other one here.
+        Token& t = tokens_[pos_];
+        t.type  = GT;
+        t.value = ">";
+        t.col  += 1;
+        return;
+    }
+    expect(GT, msg);
 }
 
 void Parser::error(const std::string& msg) {
@@ -123,7 +137,9 @@ ASTNodePtr Parser::span_node(NodeKind k, const std::string& v) {
 Prec Parser::token_prec(TokenType t) {
     switch (t) {
         case EQUAL: case PLUS_EQ: case MINUS_EQ:
-        case STAR_EQ: case SLASH_EQ:   return Prec::Assign;
+        case STAR_EQ: case SLASH_EQ:
+        case PERCENT_EQ: case AMP_EQ: case PIPE_EQ: case CARET_EQ:
+        case LSHIFT_EQ: case RSHIFT_EQ: return Prec::Assign;
         case PIPE_GT:                  return Prec::Pipeline;
         case PIPE_PIPE:                return Prec::Or;
         case PIPE:                     return Prec::Or;     // bitwise OR
@@ -146,7 +162,8 @@ Prec Parser::token_prec(TokenType t) {
 
 bool Parser::is_right_assoc(TokenType t) {
     return t == EQUAL || t == PLUS_EQ || t == MINUS_EQ ||
-           t == STAR_EQ || t == SLASH_EQ;
+           t == STAR_EQ || t == SLASH_EQ || t == PERCENT_EQ || t == AMP_EQ ||
+           t == PIPE_EQ || t == CARET_EQ || t == LSHIFT_EQ || t == RSHIFT_EQ;
 }
 
 // ── Top-level parse ───────────────────────────────────────────
@@ -604,7 +621,20 @@ std::vector<ASTNodePtr> Parser::parse_type_params() {
             p->value = advance().value;
             if (check(COLON)) {
                 advance();
-                if (check(IDENTIFIER)) p->extra = advance().value;
+                if (check(IDENTIFIER)) {
+                    p->extra = advance().value;
+                    // Multiple bounds: `T: Ord + Clone`. Stored as one
+                    // '+'-joined string ("Ord+Clone") in the same field
+                    // a single bound always used, so every existing
+                    // reader that treats it as one name keeps working
+                    // for the single-bound case; the semantic analyzer
+                    // splits on '+' to check each bound separately.
+                    while (check(PLUS)) {
+                        advance();
+                        if (!check(IDENTIFIER)) break;
+                        p->extra += "+" + advance().value;
+                    }
+                }
             }
             params.push_back(p);
         } else {
@@ -613,7 +643,7 @@ std::vector<ASTNodePtr> Parser::parse_type_params() {
         match(COMMA);
         if (ensure_progress_or_recover(pos_before, "type parameter list")) break;
     }
-    expect(GT, "Expected '>' after type parameter list");
+    expect_generic_close("Expected '>' after type parameter list");
     return params;
 }
 
@@ -715,8 +745,14 @@ ASTNodePtr Parser::parse_impl_decl() {
     // for the type name in node->extra (semantic analysis's
     // check_program, or codegen's impl_methods_ registry) the way
     // both AST transpiler and IR lowering already expect.
+    // A receiver may be a primitive: `impl Ord for int { ... }` (`int`, `float`,
+    // `bool`, `str` lex as dedicated type tokens, not identifiers).
+    auto at_type_name = [&]() {
+        return check(IDENTIFIER) || check(TYPE_INT) || check(TYPE_FLOAT) ||
+               check(TYPE_BOOL) || check(TYPE_STR);
+    };
     std::string first_ident;
-    if (check(IDENTIFIER)) first_ident = advance().value;
+    if (at_type_name()) first_ident = advance().value;
     // A generic receiver type repeats its type parameter(s) in angle
     // brackets here: `impl<T> Box<T> { ... }` — first_ident is "Box",
     // and this consumes the trailing "<T>" to produce the full
@@ -728,7 +764,7 @@ ASTNodePtr Parser::parse_impl_decl() {
             advance();
             base += "<" + parse_type_name();
             while (match(COMMA)) base += ", " + parse_type_name();
-            expect(GT, "Expected '>' after generic type argument(s)");
+            expect_generic_close("Expected '>' after generic type argument(s)");
             base += ">";
         }
         return base;
@@ -736,7 +772,7 @@ ASTNodePtr Parser::parse_impl_decl() {
     if (check(FOR)) {
         advance();
         node->value = first_ident; // nexus name
-        if (check(IDENTIFIER)) {
+        if (at_type_name()) {
             node->extra = consume_generic_suffix(advance().value); // type name
         }
     } else {
@@ -1044,7 +1080,8 @@ ASTNodePtr Parser::parse_infix(ASTNodePtr left, Prec min_prec) {
 
     // Assignment operators (right-assoc)
     if (op == EQUAL || op == PLUS_EQ || op == MINUS_EQ ||
-        op == STAR_EQ || op == SLASH_EQ) {
+        op == STAR_EQ || op == SLASH_EQ || op == PERCENT_EQ || op == AMP_EQ ||
+        op == PIPE_EQ || op == CARET_EQ || op == LSHIFT_EQ || op == RSHIFT_EQ) {
         std::string opStr = advance().value;
         auto node = span_node(NodeKind::AssignExpr, opStr);
         node->children.push_back(left);
@@ -1097,16 +1134,70 @@ ASTNodePtr Parser::parse_infix(ASTNodePtr left, Prec min_prec) {
 }
 
 // ── Primary expressions ───────────────────────────────────────
+// Parses every `{expr}` interpolation of an f-string into an AST and stores them,
+// in order, as the literal's children (`attrs["parts"]` = how many). The raw
+// text stays in `value` for the literal segments. Doing this once, here, lets
+// every later stage — the numeric typer, monomorphization, trait lowering, all
+// three backends — see the interpolated expressions as ordinary nodes instead
+// of re-lexing text of their own. The segmentation (brace-depth aware, no
+// escapes) is the same one the backends use. If any interpolation is empty or
+// does not parse, NO parts are attached and the backends fall back to their
+// own text path for the whole literal, exactly as before.
+void Parser::attach_fstring_parts(const ASTNodePtr& n) {
+    const std::string& raw = n->value;
+    std::vector<std::string> exprs;
+    std::string buf;
+    bool in_expr = false;
+    int depth = 0;
+    for (size_t i = 0; i < raw.size(); i++) {
+        if (!in_expr) {
+            if (raw[i] == '{') { in_expr = true; depth = 1; buf.clear(); }
+        } else if (raw[i] == '{') { depth++; buf += raw[i]; }
+        else if (raw[i] == '}') {
+            if (--depth == 0) { exprs.push_back(buf); in_expr = false; }
+            else buf += raw[i];
+        } else buf += raw[i];
+    }
+    if (in_expr) return;
+    if (exprs.empty()) return;
+    std::vector<ASTNodePtr> parts;
+    for (auto& text : exprs) {
+        std::string e = text;
+        while (!e.empty() && (e.front() == ' ' || e.front() == '\t')) e.erase(0, 1);
+        while (!e.empty() && (e.back()  == ' ' || e.back()  == '\t')) e.pop_back();
+        if (e.empty()) return;
+        xphage::lexer::Lexer lex(e, "<fstring>");
+        auto toks = lex.tokenize();
+        if (lex.has_errors()) return;
+        Parser sub(toks, "<fstring>");
+        ASTNodePtr node = sub.parse_single_expression();
+        if (sub.has_errors() || !node) return;
+        parts.push_back(node);
+    }
+    std::function<void(const ASTNodePtr&)> reposition = [&](const ASTNodePtr& x) {
+        if (!x) return;
+        x->span.line = n->span.line;
+        x->span.col  = n->span.col;
+        for (auto& c : x->children) reposition(c);
+    };
+    for (auto& p : parts) { reposition(p); n->children.push_back(p); }
+    n->attrs["parts"] = std::to_string(parts.size());
+}
+
 ASTNodePtr Parser::parse_primary() {
     uint32_t ln = peek().line, cl = peek().col;
 
     // Literals
     if (check(NUMBER_INT)) {
-        auto n = std::make_shared<ASTNode>(NodeKind::IntLit, advance().value, ln, cl);
+        Token tk = advance();
+        auto n = std::make_shared<ASTNode>(NodeKind::IntLit, tk.value, ln, cl);
+        if (!tk.suffix.empty()) n->attrs["suffix"] = tk.suffix;
         return n;
     }
     if (check(NUMBER_FLOAT)) {
-        auto n = std::make_shared<ASTNode>(NodeKind::FloatLit, advance().value, ln, cl);
+        Token tk = advance();
+        auto n = std::make_shared<ASTNode>(NodeKind::FloatLit, tk.value, ln, cl);
+        if (!tk.suffix.empty()) n->attrs["suffix"] = tk.suffix;
         return n;
     }
     if (check(STRING)) {
@@ -1115,6 +1206,7 @@ ASTNodePtr Parser::parse_primary() {
     }
     if (check(FSTRING)) {
         auto n = std::make_shared<ASTNode>(NodeKind::FStringLit, advance().value, ln, cl);
+        attach_fstring_parts(n);
         return n;
     }
     if (check(TRUE)) {
@@ -1242,11 +1334,45 @@ ASTNodePtr Parser::parse_primary() {
             if (check(IDENTIFIER)) full += advance().value;
             else { error("Expected identifier after '::'"); break; }
         }
+        // Explicit type arguments on a call: `zero<int>()`, `Realm::make<str, int>(x)`.
+        // `name < ...` is ALSO a comparison, so this is decided by a pure token
+        // lookahead (nothing is consumed or mutated until it succeeds): the
+        // tokens up to the matching '>' must all be type-name tokens and the
+        // closing '>' must be followed directly by '('. `a < b > (c)` is the one
+        // expression this reads as a call; it needs a call-shaped operand to
+        // appear at all and is the same ambiguity every language with this
+        // syntax has.
+        std::string type_args;
+        if (check(LT)) {
+            bool ok = false;
+            int depth = 0;
+            for (int i = 0; ; i++) {
+                const Token& t = peek(i);
+                if (t.type == END_OF_FILE) break;
+                if (t.type == LT) depth++;
+                else if (t.type == GT) depth--;
+                else if (t.type == RSHIFT) depth -= 2;
+                else if (t.type == COMMA || t.type == COLON_COLON || t.type == IDENTIFIER ||
+                         t.type == TYPE_INT || t.type == TYPE_FLOAT || t.type == TYPE_BOOL ||
+                         t.type == TYPE_STR) { /* part of a type name */ }
+                else break;
+                if (depth < 0) break;
+                if (depth == 0) { ok = peek(i + 1).type == LPAREN; break; }
+            }
+            if (ok) {
+                advance(); // '<'
+                type_args = parse_type_name();
+                while (match(COMMA)) type_args += "," + parse_type_name();
+                expect_generic_close("Expected '>' after type arguments");
+            }
+        }
         if (is_path) {
             auto n = std::make_shared<ASTNode>(NodeKind::PathExpr, full, ln, cl);
+            if (!type_args.empty()) n->attrs["type_args"] = type_args;
             return n;
         }
         auto n = std::make_shared<ASTNode>(NodeKind::Identifier, full, ln, cl);
+        if (!type_args.empty()) n->attrs["type_args"] = type_args;
         return n;
     }
 
@@ -1373,7 +1499,7 @@ ASTNodePtr Parser::parse_spawn_expr() {
             advance();
             tname += "<" + parse_type_name();
             while (match(COMMA)) tname += ", " + parse_type_name();
-            expect(GT, "Expected '>' after generic type argument(s)");
+            expect_generic_close("Expected '>' after generic type argument(s)");
             tname += ">";
         }
         node->value = tname;
@@ -1483,7 +1609,7 @@ std::string Parser::parse_type_name() {
             advance();
             name += "<" + parse_type_name();
             while (match(COMMA)) name += ", " + parse_type_name();
-            expect(GT, "Expected '>'");
+            expect_generic_close("Expected '>'");
             name += ">";
         }
         return name;

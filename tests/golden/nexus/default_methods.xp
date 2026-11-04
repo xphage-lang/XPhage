@@ -1,0 +1,26 @@
+// Language book §8.4 — default methods: inherited, overridable, reachable through a bound.
+nexus Logger {
+    log(message: str) -> void
+    log_info(msg: str) -> void { self.log(f"[INFO] {msg}") }
+    log_warn(msg: str) -> void { self.log(f"[WARN] {msg}") }
+}
+forge Console { prefix: str = "> " }
+forge Quiet { n: int = 0 }
+impl Logger for Console {
+    log(message: str) -> void { beam f"{self.prefix}{message}" }
+}
+impl Logger for Quiet {
+    log(message: str) -> void { beam f"q:{message}" }
+    log_warn(msg: str) -> void { beam f"overridden:{msg}" }
+}
+pulse alert<T: Logger>(l: T, m: str) -> void { l.log_info(m) }
+pulse main() {
+    atom c = spawn Console { }
+    atom q = spawn Quiet { }
+    c.log("direct")
+    c.log_info("default")
+    c.log_warn("w")
+    q.log_info("i")
+    q.log_warn("w2")
+    alert(c, "via generic")
+}

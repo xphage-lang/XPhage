@@ -1,0 +1,5 @@
+nexus Animal { speak() -> str }
+forge Dog { n: int = 0 }
+impl Animal for Dog { speak() -> str { return "Woof" } }
+pulse talk(a: Animal) -> str { return a.speak() }
+pulse main() { beam 1 }

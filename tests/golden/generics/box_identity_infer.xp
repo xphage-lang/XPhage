@@ -1,0 +1,13 @@
+forge Box<T> {
+    value: T
+}
+
+pulse get_value<T>(b: Box<T>) -> T {
+    return b.value
+}
+
+pulse main() {
+    atom b: Box<int> = spawn Box<int> { value: 42 }
+    atom v = get_value(b)
+    beam f"v={v}"
+}

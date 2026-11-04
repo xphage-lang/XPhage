@@ -1,0 +1,10 @@
+enum Color { Red  Green }
+pulse name(c: Color) {
+    probe c {
+        diverge Color.Red -> { beam f"red" }
+        diverge Color.Green -> { beam f"green" }
+    }
+}
+pulse main() {
+    name(Color.Green)
+}

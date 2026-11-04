@@ -90,3 +90,35 @@ automatically adapted to/from `const char*` — XPhage code keeps using
 ordinary strings; the compiler inserts the `.c_str()` / wrapping for you.
 Raw pointer types (`*mut T`, `*const T`) are supported for FFI signatures
 that need them.
+
+## core (new) -- Option<T> and Result<T, E>, written in XPhage
+
+`~link "core"` -- real generic enums plus `option_*` / `result_*` helpers, in
+`library/core/core.xh`. Unlike the other modules this one is XPhage source, not
+a signature list backed by the compiler's C++ prelude, so every backend (C++,
+XIL, LLVM) compiles the same code and behaves the same. It is also what the
+`?` operator is defined on, and `panic(msg)` (always available, exits 101) is
+what its `*_unwrap` / `*_expect` use. `collections` depends on it and loads it
+for you. See the header of `core/core.xh` for what is deliberately absent
+(`option_map` and friends need function values, which the language lacks).
+
+**Direction for the rest of the library:** write modules in XPhage on top of a
+small set of native primitives, instead of adding more C++ to the prelude. The
+prelude is duplicated (AST path and XIL path) and the LLVM backend has no
+stdlib at all, so prelude-only functions are unavailable there.
+
+### Measured status (automated probe: one generated program per scalar-typed signature, C++ backend)
+
+| module | declared | compiles and runs | notes |
+|---|---|---|---|
+| core | 14 | 14 | XPhage source; every function exercised by the golden suite; identical on all three backends |
+| string | 52 | 52 | smoke-tested only (no value checks yet) |
+| io | 34 | 34 | smoke-tested only |
+| math | 96 | 53 | 11 forward-declared (`*_list`, `mat4_*`, `bit_reverse`); 32 take vec/mat types, not probed |
+| collections | 95 | 57 | legacy string-handle API: 27 fail (e.g. `vec_push(v, 7)` does not compile), 11 not probed; deprecated |
+| os | 60 | 0 | declared only |
+| net | 54 | 0 | declared only |
+| crypt | 39 | 0 | declared only |
+| ai | 95 | 0 | declared only |
+
+LLVM has none of string/io/math/collections/os/net/crypt/ai.

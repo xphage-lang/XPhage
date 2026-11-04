@@ -69,7 +69,11 @@ private:
 
     // ── Pass 2: body checking ──────────────────────────────────
     void check_program(const Program& prog);
-    void check_pulse_body(const ASTNodePtr& pulse_decl);
+    // `self_type` is the receiver type when the body is an impl method:
+    // `self` is then in scope (typed as the receiver) whether the method
+    // was written with an explicit `self` parameter or — the form the
+    // language book uses throughout Chapter 8 — without one.
+    void check_pulse_body(const ASTNodePtr& pulse_decl, const std::string& self_type = "");
     void check_stmt(const ASTNodePtr& stmt);
     void check_block(const ASTNodePtr& block);
     // Returns the inferred/declared type string for the expression,
@@ -96,11 +100,61 @@ private:
     // silently accepting is preferable to a false-positive error on
     // code this pass simply doesn't have enough information about.
     bool satisfies_bound(const std::string& type_name, const std::string& bound_nexus) const;
+    // A bound may be several nexus joined by '+' ("Ord+Clone"). Returns
+    // the first one `type_name` does not satisfy, or "" when it
+    // satisfies all of them.
+    std::string first_unsatisfied_bound(const std::string& type_name, const std::string& bound) const;
+    bool satisfies_one_bound(const std::string& type_name, const std::string& bound_nexus) const;
+
+    // ── nexus conformance ───────────────────────────────────────
+    // `impl N for T` must provide every method of N that has no default
+    // body, with the same arity and (with `Self` = T) the same
+    // parameter/return types, and may not add methods N does not
+    // declare (those belong in an inherent `impl T { }`).
+    void check_impl_conformance(const ASTNodePtr& impl);
+    // A nexus is a compile-time contract, not a type: it can be a
+    // generic bound (`<T: Animal>`) but not a parameter/field/variable
+    // type (that would need dynamic dispatch, which is not supported).
+    void check_not_nexus_type(const std::string& type_str, const Span& span, const char* what);
+    // Every name in a type parameter's bound must be a declared nexus
+    // (or the built-in `Numeric`).
+    void check_bound_names(const ASTNodePtr& type_param);
+    std::unordered_map<std::string, const ASTNode*> nexus_nodes_; // nexus name -> its NexusDecl
+    std::vector<std::string> realm_stack_;                        // collect_impls: enclosing realms
+    // ── associated (receiver-less) functions: `Type::f()`, `T::f()` ──
+    std::unordered_map<std::string, std::unordered_set<std::string>> assoc_fns_; // bare receiver type -> fn names
+    std::unordered_set<std::string> forge_names_;                                 // bare forge names
+    std::unordered_set<std::string> realm_names_;
+    std::unordered_map<std::string, std::string> fn_type_params_;                 // type param in scope -> bound ("A+B")
+    void check_assoc_path_call(const ASTNodePtr& call);
     // Walks the whole program once, before any call-site checking,
     // recording every `impl Nexus for Type { ... }` into
     // impl_registry_.
     void collect_impls(const ASTNodePtr& n);
     std::unordered_map<std::string, std::unordered_set<std::string>> impl_registry_; // nexus -> {types implementing it}
+
+    // ── `?` (error propagation) validation ───────────────────────
+    // `expr?` returns early from the ENCLOSING pulse, so it is only
+    // meaningful when that pulse itself returns a Result-like or
+    // Option-like enum, and only applies to a value of such a type. An
+    // enum is "Result-like" when it has `Ok(T)` and `Err(E)` variants and
+    // "Option-like" when it has `Some(T)` and a fieldless `None` —
+    // decided by shape, not by the enum's name, so a user-declared
+    // Result/Option (the language defines them as ordinary generic
+    // enums) and any enum with the same shape all qualify.
+    struct TryShape {
+        enum Kind { NotTry, ResultLike, OptionLike } kind = NotTry;
+        std::string enum_name;
+        std::string ok_type;    // payload of Ok / Some, type args substituted
+        std::string fail_type;  // payload of Err (empty for Option-like)
+    };
+    TryShape try_shape_of(const std::string& type_str) const;
+    void check_propagate(const ASTNodePtr& expr);
+    void check_fstring_propagate(const ASTNodePtr& expr);
+    std::unordered_map<std::string, const ASTNode*> enum_decl_nodes_; // enum name -> its EnumDecl
+    std::string                     current_fn_name_;      // empty outside any pulse
+    std::string                     current_fn_ret_;       // declared return type; empty = returns nothing
+    std::vector<std::string>        current_fn_tparams_;   // enclosing pulse's own type parameters
 
     // ── Diagnostic helpers ──────────────────────────────────────
     void error(const std::string& code, const Span& span, const std::string& msg,

@@ -1,0 +1,10 @@
+~link "core"
+pulse load(k: int) -> Result<int, str> {
+    if k == 1 { return Result.Ok(1) }
+    return Result.Err("disk on fire")
+}
+pulse main() {
+    beam f"start"
+    atom v = result_expect(load(2), "could not load config")
+    beam f"unreachable {v}"
+}
